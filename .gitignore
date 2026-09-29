@@ -1,0 +1,18 @@
+node_modules/
+
+# Frontend IS part of the app - it must be tracked, not ignored.
+!dist/
+
+src-tauri/target/
+*.log
+
+# Stray Windows cache dirs that can appear in the repo root when tests
+# pass a literal %SystemDrive% through to the filesystem layer.
+/%SystemDrive%/
+
+# The render harnesses are dev-only but must be tracked: they are the only
+# automated coverage the frontend has.
+COMMIT_MSG.txt
+
+# Output of the --probe-cancel diagnostic.
+src-tauri/cancel_probe.txt
