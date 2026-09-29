@@ -1,0 +1,3 @@
+# Dev-only render/test harnesses. Tracked in git (they are the frontend's
+# only automated coverage) but must never ship inside the packaged exe.
+_*.mjs
