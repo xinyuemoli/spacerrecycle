@@ -18,10 +18,18 @@
     Testing without installing is possible on a machine with Developer Mode on:
         winapp run src-tauri\target\msix\stage --detach
 
+.PARAMETER PackageName
+    Manifest Identity Name. Must match Package/Identity/Name from the Partner
+    Center "Product identity" panel before the Store will accept the upload.
+
 .PARAMETER Publisher
     Publisher distinguished name written into the manifest Identity. It MUST
     match the Publisher DN assigned to your Partner Center account before the
     Store will accept the package. The default is a local-testing placeholder.
+
+.PARAMETER PublisherDisplay
+    Human-readable publisher name shown to users. Must match
+    Package/Identity/PublisherDisplayName from the same panel.
 
 .EXAMPLE
     .\scripts\build-msix.ps1
@@ -29,8 +37,10 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version   = "0.1.0.0",
-    [string]$Publisher = "CN=xinyuemoli",
+    [string]$Version          = "0.1.0.0",
+    [string]$PackageName      = "SpaceRecycle",
+    [string]$Publisher        = "CN=xinyuemoli",
+    [string]$PublisherDisplay = "SpaceRecycle",
     [switch]$SkipBuild
 )
 
@@ -65,7 +75,7 @@ Copy-Item $exePath (Join-Path $stageDir "spacerrecycle.exe") -Force
 
 Write-Host "==> generating image assets" -ForegroundColor Cyan
 winapp manifest generate $stageDir `
-    --package-name SpaceRecycle `
+    --package-name $PackageName `
     --publisher-name $Publisher `
     --version $Version `
     --description "Windows disk-space reclamation tool that never deletes anything on its own." `
@@ -75,7 +85,10 @@ winapp manifest generate $stageDir `
 
 Write-Host "==> applying manifest template" -ForegroundColor Cyan
 $xml = Get-Content $template -Raw
-$xml = $xml.Replace("{{VERSION}}", $Version).Replace("{{PUBLISHER}}", $Publisher)
+$xml = $xml.Replace("{{VERSION}}", $Version)
+$xml = $xml.Replace("{{PACKAGE_NAME}}", $PackageName)
+$xml = $xml.Replace("{{PUBLISHER}}", $Publisher)
+$xml = $xml.Replace("{{PUBLISHER_DISPLAY}}", $PublisherDisplay)
 Set-Content (Join-Path $stageDir "Package.appxmanifest") $xml -Encoding UTF8
 
 Write-Host "==> packaging and signing MSIX" -ForegroundColor Cyan
@@ -87,4 +100,5 @@ try {
 $size = [math]::Round((Get-Item $outFile).Length / 1MB, 2)
 Write-Host ""
 Write-Host "Built: $outFile ($size MB)" -ForegroundColor Green
-Write-Host "Reminder: set -Publisher to the Partner Center Publisher DN before Store submission." -ForegroundColor Yellow
+Write-Host "Before Store submission all three identity values must match the Partner" -ForegroundColor Yellow
+Write-Host "Center 'Product identity' panel: -PackageName, -Publisher, -PublisherDisplay." -ForegroundColor Yellow

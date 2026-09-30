@@ -4,8 +4,12 @@
   SpaceRecycle MSIX manifest template.
 
   Used by scripts/build-msix.ps1: winapp generates the image assets, then this
-  file replaces the generated Package.appxmanifest ({{VERSION}} / {{PUBLISHER}}
-  are substituted at build time).
+  file replaces the generated Package.appxmanifest. Placeholders {{VERSION}},
+  {{PACKAGE_NAME}}, {{PUBLISHER}} and {{PUBLISHER_DISPLAY}} are substituted at
+  build time from the Partner Center "Product identity" panel.
+
+  Before submitting to the Store, all three Identity values must match the ones
+  Partner Center assigns to the product, otherwise the upload is rejected.
 
   Why MSIX at all: submitting an MSIX to the Microsoft Store gets the package
   code-signed by Microsoft for free. The unpackaged EXE/MSI Store route instead
@@ -24,13 +28,13 @@
   IgnorableNamespaces="uap uap2 uap3 uap10 desktop desktop6 rescap win32dependencies">
 
   <Identity
-    Name="SpaceRecycle"
+    Name="{{PACKAGE_NAME}}"
     Publisher="{{PUBLISHER}}"
     Version="{{VERSION}}" />
 
   <Properties>
     <DisplayName>SpaceRecycle</DisplayName>
-    <PublisherDisplayName>SpaceRecycle</PublisherDisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY}}</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <uap10:PackageIntegrity>
       <uap10:Content Enforcement="on"/>
