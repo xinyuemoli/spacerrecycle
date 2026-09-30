@@ -168,7 +168,7 @@ disk space
 | 字段 | 建议值 |
 |---|---|
 | Category | **Utilities & tools** → System tuning / 系统调优 |
-| Privacy policy URL | `https://spacerrecycle.pages.dev/privacy.html` |
+| Privacy policy URL | `https://spacerrecycle.pages.dev/privacy` |
 | Support contact | `https://github.com/xinyuemoli/spacerrecycle/issues` |
 | Website | `https://spacerrecycle.pages.dev` |
 | Pricing | Free |
