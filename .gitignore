@@ -16,3 +16,6 @@ COMMIT_MSG.txt
 
 # Output of the --probe-cancel diagnostic.
 src-tauri/cancel_probe.txt
+
+# Cloudflare Wrangler local state (deployment cache, local bindings).
+.wrangler/
