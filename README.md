@@ -5,7 +5,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Built with **Rust + Tauri 2**. A single ~10 MB executable, no bundler, no npm, no background services, no boot-time scans, no silent cleanup.
+Built with **Rust + Tauri 2**. A single ~6 MB executable, no bundler, no npm, no background services, no boot-time scans, no silent cleanup.
 
 ## Why SpaceRecycle?
 
