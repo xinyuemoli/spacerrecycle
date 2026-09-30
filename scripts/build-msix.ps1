@@ -37,7 +37,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version          = "0.1.0.0",
+    [string]$Version          = "1.0.0.0",
     [string]$PackageName      = "SpaceRecycle",
     [string]$Publisher        = "CN=xinyuemoli",
     [string]$PublisherDisplay = "SpaceRecycle",
@@ -60,6 +60,14 @@ if (-not (Get-Command winapp -ErrorAction SilentlyContinue)) {
 }
 if (-not (Test-Path $template)) { throw "Missing manifest template: $template" }
 if (-not (Test-Path $logoSrc))  { throw "Missing icon source (needs >= 400x400): $logoSrc" }
+
+# The Store rejects a package whose version starts with 0: for Windows 10/11
+# packages the Major section "cannot be 0" (and the fourth section is reserved
+# for the Store and must be 0). Fail fast instead of building something unusable.
+$verParts = $Version.Split('.')
+if ($verParts.Count -ne 4) { throw "Version '$Version' must be in Major.Minor.Build.Revision form." }
+if ([int]$verParts[0] -lt 1) { throw "Invalid package version '$Version': the Major section cannot be 0 for a Store submission (use e.g. 1.0.0.0)." }
+if ([int]$verParts[3] -ne 0) { throw "Invalid package version '$Version': the fourth section is reserved for the Store and must be 0." }
 
 if (-not $SkipBuild) {
     Write-Host "==> cargo build --release" -ForegroundColor Cyan
