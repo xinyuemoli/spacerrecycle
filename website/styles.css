@@ -40,6 +40,19 @@ a:hover { text-decoration: underline; }
 .logo { font-weight: 700; font-size: 1.15rem; }
 .nav nav a { color: var(--muted); margin-left: 20px; }
 .nav nav a:hover { color: var(--text); text-decoration: none; }
+.lang-switch {
+  margin-left: 20px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-family: inherit;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.lang-switch:hover { color: var(--text); border-color: var(--accent); }
 
 .hero {
   max-width: 960px;

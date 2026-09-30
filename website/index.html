@@ -12,73 +12,76 @@
   <div class="nav-inner">
     <span class="logo">SpaceRecycle</span>
     <nav>
-      <a href="#features">Features</a>
-      <a href="#trust">Why trust it</a>
-      <a href="#download">Download</a>
+      <a href="#features" data-i18n="nav_features">Features</a>
+      <a href="#trust" data-i18n="nav_trust">Why trust it</a>
+      <a href="#download" data-i18n="nav_download">Download</a>
+      <button class="lang-switch" data-lang-switch type="button" aria-label="Switch language">中文</button>
     </nav>
   </div>
 </header>
 
 <main>
   <section class="hero">
-    <h1>A disk cleaner you can <em>actually</em> trust.</h1>
-    <p class="lede">
+    <h1 data-i18n="hero_title">A disk cleaner you can <em>actually</em> trust.</h1>
+    <p class="lede" data-i18n="hero_lede">
       SpaceRecycle tells you where your disk space went, lets you pick what to
       clean, and asks you to confirm — <strong>it never deletes anything on its own.</strong>
     </p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/xinyuemoli/spacerrecycle/releases">Download for Windows</a>
-      <a class="btn ghost" href="#features">See what it finds</a>
+      <a class="btn primary" href="https://github.com/xinyuemoli/spacerrecycle/releases" data-i18n="cta_download">Download for Windows</a>
+      <a class="btn ghost" href="#features" data-i18n="cta_features">See what it finds</a>
     </div>
-    <p class="hint">Windows 10 1809+ &middot; ~10 MB &middot; open source (MIT) &middot; no ads, no bundleware, no background services</p>
+    <p class="hint" data-i18n="hero_hint">Windows 10 1809+ &middot; ~10 MB &middot; open source (MIT) &middot; no ads, no bundleware, no background services</p>
   </section>
 
   <section id="features" class="section">
-    <h2>Where your space actually went</h2>
+    <h2 data-i18n="features_title">Where your space actually went</h2>
     <div class="grid">
       <article class="card">
-        <h3>🧹 Temp junk &amp; caches</h3>
-        <p>Temp folders, browser caches, crash dumps, and Windows Update leftovers — typically 1–20 GB, safe to reclaim.</p>
+        <h3 data-i18n="feat1_title">🧹 Temp junk &amp; caches</h3>
+        <p data-i18n="feat1_desc">Temp folders, browser caches, crash dumps, and Windows Update leftovers — typically 1–20 GB, safe to reclaim.</p>
       </article>
       <article class="card">
-        <h3>📦 Dev artifacts</h3>
-        <p><code>node_modules</code>, <code>target</code>, <code>.venv</code>, and package caches — usually the biggest win, 10–100+ GB.</p>
+        <h3 data-i18n="feat2_title">📦 Dev artifacts</h3>
+        <p data-i18n="feat2_desc"><code>node_modules</code>, <code>target</code>, <code>.venv</code>, and package caches — usually the biggest win, 10–100+ GB.</p>
       </article>
       <article class="card">
-        <h3>📁 Large files</h3>
-        <p>Files over 500 MB, aggregated by directory so you see who is eating the space — then decide for yourself.</p>
+        <h3 data-i18n="feat3_title">📁 Large files</h3>
+        <p data-i18n="feat3_desc">Files over 500 MB, aggregated by directory so you see who is eating the space — then decide for yourself.</p>
       </article>
       <article class="card">
-        <h3>🗑️ App leftovers</h3>
-        <p>Directories left behind by uninstalled apps and stale installers, cross-checked against what's actually installed.</p>
+        <h3 data-i18n="feat4_title">🗑️ App leftovers</h3>
+        <p data-i18n="feat4_desc">Directories left behind by uninstalled apps and stale installers, cross-checked against what's actually installed.</p>
       </article>
     </div>
   </section>
 
   <section id="trust" class="section dark">
-    <h2>Built on trust, not tricks</h2>
+    <h2 data-i18n="trust_title">Built on trust, not tricks</h2>
     <ul class="points">
-      <li><strong>Nothing is preselected.</strong> Every action starts with you.</li>
-      <li><strong>Preview before anything happens.</strong> You see exactly what will be purged or quarantined, grouped by category.</li>
-      <li><strong>Quarantine, not deletion.</strong> Unsure items move to an NTFS-compressed, restorable store — they are only destroyed when you say so.</li>
-      <li><strong>Audit log.</strong> Every cleanup, restore, and purge is written to a traceable log.</li>
-      <li><strong>Open source.</strong> The source is public under MIT — read it, build it yourself, and verify there is no silent cleanup.</li>
+      <li data-i18n="trust1"><strong>Nothing is preselected.</strong> Every action starts with you.</li>
+      <li data-i18n="trust2"><strong>Preview before anything happens.</strong> You see exactly what will be purged or quarantined, grouped by category.</li>
+      <li data-i18n="trust3"><strong>Quarantine, not deletion.</strong> Unsure items move to an NTFS-compressed, restorable store — they are only destroyed when you say so.</li>
+      <li data-i18n="trust4"><strong>Audit log.</strong> Every cleanup, restore, and purge is written to a traceable log.</li>
+      <li data-i18n="trust5"><strong>Open source.</strong> The source is public under MIT — read it, build it yourself, and verify there is no silent cleanup.</li>
     </ul>
   </section>
 
   <section id="download" class="section">
-    <h2>Download</h2>
-    <p>Get the latest release, or build it from source. No installer tricks, no bundled software.</p>
+    <h2 data-i18n="download_title">Download</h2>
+    <p data-i18n="download_desc">Get the latest release, or build it from source. No installer tricks, no bundled software.</p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/xinyuemoli/spacerrecycle/releases">GitHub Releases</a>
-      <a class="btn ghost" href="https://github.com/xinyuemoli/spacerrecycle">View source</a>
+      <a class="btn primary" href="https://github.com/xinyuemoli/spacerrecycle/releases" data-i18n="download_releases">GitHub Releases</a>
+      <a class="btn ghost" href="https://github.com/xinyuemoli/spacerrecycle" data-i18n="download_source">View source</a>
     </div>
-    <p class="hint">Microsoft Store version coming soon.</p>
+    <p class="hint" data-i18n="download_hint">Microsoft Store version coming soon.</p>
   </section>
 </main>
 
 <footer>
-  <p>SpaceRecycle &middot; MIT License &middot; <a href="https://github.com/xinyuemoli/spacerrecycle">GitHub</a></p>
+  <p>SpaceRecycle &middot; <span data-i18n="footer_license">MIT License</span> &middot; <a href="https://github.com/xinyuemoli/spacerrecycle">GitHub</a></p>
 </footer>
+
+<script src="i18n.js"></script>
 </body>
 </html>
