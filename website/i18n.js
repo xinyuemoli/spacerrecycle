@@ -36,7 +36,30 @@
       download_releases: "GitHub Releases",
       download_source: "View source",
       download_hint: "Microsoft Store version coming soon.",
-      footer_license: "MIT License"
+      footer_license: "MIT License",
+      footer_privacy: "Privacy",
+      privacy_title: "Privacy Policy — SpaceRecycle",
+      privacy_desc: "SpaceRecycle collects no data. No telemetry, no accounts, no tracking — in the app or on this website.",
+      privacy_h1: "Privacy Policy",
+      privacy_updated: "Last updated: September 30, 2026",
+      privacy_intro: "SpaceRecycle is built around a simple promise: <strong>it never does anything on your device without you asking.</strong> This page explains exactly what that means for your data.",
+      privacy_app_h2: "The desktop app collects nothing",
+      privacy_app_1: "<strong>No telemetry.</strong> The app sends no usage data, analytics, or crash reports anywhere.",
+      privacy_app_2: "<strong>No account.</strong> There is no sign-up, no login, and no cloud service.",
+      privacy_app_3: "<strong>Everything stays on your machine.</strong> Scanning, cleanup, the quarantine store, and the audit log all happen locally. Nothing is uploaded.",
+      privacy_app_4: "<strong>No network requests for your data.</strong> Your file names, paths, and usage are never transmitted to us or anyone else.",
+      privacy_app_local: "The only files the app creates live on your own disk: the quarantine store (default <code>%ProgramData%\\SpaceRecycle\\Quarantine</code>), the audit log, and its config file. You can inspect, export, or delete all of them at any time.",
+      privacy_site_h2: "This website",
+      privacy_site_p: "The website uses <strong>Cloudflare Web Analytics</strong>, a cookie-less, privacy-first analytics service. It reports aggregate page views and visits only — no cookies, no fingerprinting, no cross-site tracking, and no personal data stored. The site is fully static: no accounts, no forms, no comments.",
+      privacy_dl_h2: "Downloads",
+      privacy_dl_p: "Installers are served by GitHub Releases. GitHub may record the download under <a href=\"https://docs.github.com/en/site-policy/privacy-policies/github-privacy-statement\">GitHub's Privacy Statement</a>. We only ever see an aggregate download count.",
+      privacy_children_h2: "Children's privacy",
+      privacy_children_p: "Neither the app nor the website collects personal data from anyone, including children.",
+      privacy_changes_h2: "Changes",
+      privacy_changes_p: "If this policy changes, the new version will be published on this page.",
+      privacy_contact_h2: "Contact",
+      privacy_contact_p: "Questions? Open an issue on <a href=\"https://github.com/xinyuemoli/spacerrecycle/issues\">GitHub</a>.",
+      privacy_back: "← Back to home"
     },
     zh: {
       lang_switch: "English",
@@ -70,7 +93,30 @@
       download_releases: "GitHub Releases",
       download_source: "查看源码",
       download_hint: "Microsoft Store 版本即将上线。",
-      footer_license: "MIT 许可证"
+      footer_license: "MIT 许可证",
+      footer_privacy: "隐私政策",
+      privacy_title: "隐私政策 — SpaceRecycle",
+      privacy_desc: "SpaceRecycle 不收集任何数据。无论应用还是官网，都没有遥测、没有账号、没有追踪。",
+      privacy_h1: "隐私政策",
+      privacy_updated: "最后更新：2026 年 9 月 30 日",
+      privacy_intro: "SpaceRecycle 的核心承诺很简单：<strong>未经你的操作，绝不在你的设备上做任何事。</strong>本页说明这对你的数据意味着什么。",
+      privacy_app_h2: "桌面应用不收集任何数据",
+      privacy_app_1: "<strong>无遥测。</strong>应用不会向任何地方发送使用数据、统计信息或崩溃报告。",
+      privacy_app_2: "<strong>无账号。</strong>没有注册、没有登录、没有云服务。",
+      privacy_app_3: "<strong>一切都在你本机完成。</strong>扫描、清理、隔离区、审计日志全部在本机进行，不上传任何内容。",
+      privacy_app_4: "<strong>不传输你的数据。</strong>你的文件名、路径和使用情况绝不会被发送给我们或任何第三方。",
+      privacy_app_local: "应用只在你自己磁盘上创建文件：隔离区（默认 <code>%ProgramData%\\SpaceRecycle\\Quarantine</code>）、审计日志和配置文件。你随时可以查看、导出或删除它们。",
+      privacy_site_h2: "关于官网",
+      privacy_site_p: "官网使用 <strong>Cloudflare Web Analytics</strong>——一个无 cookie、隐私优先的统计服务。它只提供聚合的页面浏览量与访客数：不使用 cookie、不做指纹识别、不跨站追踪、不存储个人数据。官网是纯静态的：没有账号、表单或评论。",
+      privacy_dl_h2: "下载",
+      privacy_dl_p: "安装包由 GitHub Releases 提供。GitHub 可能依据 <a href=\"https://docs.github.com/en/site-policy/privacy-policies/github-privacy-statement\">GitHub 隐私声明</a> 记录下载。我们只能看到聚合的下载次数。",
+      privacy_children_h2: "儿童隐私",
+      privacy_children_p: "应用与官网均不收集任何人的个人数据，包括儿童。",
+      privacy_changes_h2: "政策变更",
+      privacy_changes_p: "若本政策发生变更，新版本将发布在本页面。",
+      privacy_contact_h2: "联系方式",
+      privacy_contact_p: "有问题？请在 <a href=\"https://github.com/xinyuemoli/spacerrecycle/issues\">GitHub</a> 提 issue。",
+      privacy_back: "← 返回首页"
     }
   };
 
@@ -89,9 +135,14 @@
     var dict = I18N[lang] || I18N.en;
     document.documentElement.lang = lang;
 
-    document.title = dict.page_title;
+    // Title/description can be overridden per page through data-i18n-title /
+    // data-i18n-desc on the <html> element; they default to the home page keys.
+    var root = document.documentElement;
+    var titleKey = root.getAttribute("data-i18n-title") || "page_title";
+    var descKey = root.getAttribute("data-i18n-desc") || "page_desc";
+    document.title = dict[titleKey] || dict.page_title;
     var meta = document.querySelector('meta[name="description"]');
-    if (meta) meta.setAttribute("content", dict.page_desc);
+    if (meta && dict[descKey]) meta.setAttribute("content", dict[descKey]);
 
     var els = document.querySelectorAll("[data-i18n]");
     for (var i = 0; i < els.length; i++) {
