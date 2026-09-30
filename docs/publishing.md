@@ -83,12 +83,68 @@ MIT License — read the source and verify there is no silent cleanup.
 
 ---
 
-## 4. Microsoft Store 上架（免费代签，最后做）
+## 4. Microsoft Store 上架（MSIX，免费代签）
 
-- 开发者账号**免费**（个人账号需政府 ID + 自拍实名）：<https://storedeveloper.microsoft.com>。
-- 走**传统 Win32 应用（MSI/EXE）**通道，微软用自己的证书代签，SmartScreen 直接放行，不必用 MSIX。
-- 提交前需备齐：安装包、应用描述、截图、图标（已有 `src-tauri/icons/`）、**隐私政策 URL**（可先放官网一个简单页面）、年龄分级问卷。
-- 上架有政策审核，不是"上传即签名"，建议等官网和 README 成型后再提交。
+### ⚠️ 关键前提：免费签名只属于 MSIX
+
+| | **MSIX 打包** | **EXE/MSI 直链（未打包）** |
+|---|---|---|
+| 代码签名 | ✅ **微软免费签** | ⚠️ **必须自购 CA 证书**（¥700–1400/年） |
+| 托管 | ✅ 微软免费托管 | 你自己托管 |
+| 自动更新 | ✅ 系统每 24h 检查 | 自己实现 |
+| S 模式 | ✅ 支持 | ❌ 不支持 |
+
+Tauri 官方文档确认：Tauri 只产出 EXE/MSI，那条路 **"must be code signed"**。所以**想免签名费，只能走 MSIX**。
+
+### 4.1 打包 MSIX（已实测可复现）
+
+前置（一次性）：
+
+```powershell
+winget install microsoft.winappcli --source winget
+```
+
+打包（流程已固化在 `scripts/build-msix.ps1`）：
+
+```powershell
+.\scripts\build-msix.ps1 -Version 0.1.0.0 -Publisher "CN=xinyuemoli"
+```
+
+产物：`src-tauri\target\msix\SpaceRecycle_0.1.0.0_x64.msix`（约 2.7 MB，已用开发证书签名）。
+
+脚本四步：`cargo build --release`（`-SkipBuild` 可跳过）→ `winapp manifest generate` 生成全部图标资产 → 套用 `src-tauri/msix/Package.appxmanifest.template` → `winapp package` 出包签名。
+
+模板里有两处**按实测修正过**的关键点：
+
+- `MinVersion="10.0.17763.0"`（Windows 10 1809，与 README/官网口径一致）。winapp 默认给的是 1903，会平白排除一批实际支持的用户。
+- `win32dependencies:ExternalDependency` 声明 **WebView2**。MSIX 应用无法像 NSIS/MSI 那样运行 WebView2 引导安装器，靠 App Installer 链式安装来补齐（Win11 预装、绝大多数 Win10 已有）。
+
+### 4.2 本地测试（已实测通过）
+
+开发者模式开启时，**无需管理员权限**即可实测：
+
+```powershell
+winapp run src-tauri\target\msix\stage --detach
+```
+
+实测结论（2026-09-30）：应用以包身份正常启动，`msedgewebview2.exe` 子进程生成，UI 完整渲染，Rust 后端读到真实磁盘数据（`C:\ 63.8 GB 可用 / 476 GB`）。
+
+清理测试注册：`Get-AppxPackage -Name "SpaceRecycle*" | Remove-AppxPackage`
+
+> 若要手动安装 MSIX 文件，需先信任开发证书（需管理员，每张证书只需一次）：
+> `winapp cert install src-tauri\target\msix\SpaceRecycle_cert.pfx`
+
+### 4.3 提交上架
+
+1. 免费开发者账号（个人需政府 ID + 自拍实名）：<https://storedeveloper.microsoft.com>
+2. Partner Center → **New Product** → 预留名称 `SpaceRecycle`
+3. **把 `-Publisher` 换成 Partner Center 分配给你的 Publisher DN**（关键，填错会被拒）
+4. 上传 MSIX + 填写商店信息（文案直接取 `docs/store-listing.md`）
+5. 提交 → 政策审核 → 通过后**微软自动签名**
+
+### 4.4 仍需人工实测的一项
+
+**UAC 提权路径**：应用有「清理失败时提权重试」（`retry_cleanup_elevated`）。MSIX 应用运行在容器中，自行提权可能受限。需要在打包版上实际触发一次权限失败、点「提权重试」来验证。这是目前唯一无法自动验证的点。
 
 ---
 
@@ -99,5 +155,9 @@ MIT License — read the source and verify there is no silent cleanup.
 | `LICENSE` | MIT 许可证（开源硬门槛） |
 | `README.md` | 定位、特性、下载、构建、安全模型 |
 | `dist/.taurignore` | 打包时排除 `_test_*.mjs` 测试 harness，不破坏前端测试 |
-| `website/index.html` + `styles.css` | Cloudflare Pages 可部署的官网骨架 |
+| `website/`（`index.html`+`styles.css`+`i18n.js`+`privacy.html`） | 中英双语官网，Cloudflare Pages 自动部署 |
+| `docs/store-listing.md` | Store 上架文案（中英双语，可直接粘贴） |
+| `src-tauri/icons/icon-1024.png` | MSIX 资产生成用的图标源（≥400×400） |
+| `src-tauri/msix/Package.appxmanifest.template` | MSIX manifest 模板（含 WebView2 依赖、1809 最低版本） |
+| `scripts/build-msix.ps1` | 一键打包 MSIX 的脚本 |
 | 本文件 | 从开源到上架的完整操作手册 |
