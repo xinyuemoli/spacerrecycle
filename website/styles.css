@@ -115,6 +115,17 @@ footer {
   color: var(--muted);
   font-size: 0.9rem;
 }
+footer a { color: var(--muted); }
+footer a:hover { color: var(--accent); }
+
+/* Policy page */
+.policy { padding-top: 56px; }
+.policy h1 { font-size: 2rem; margin: 0 0 8px; letter-spacing: -0.01em; }
+.policy .updated { color: var(--muted); font-size: 0.9rem; margin: 0 0 8px; }
+.policy h2 { font-size: 1.25rem; margin: 36px 0 12px; }
+.policy p { color: var(--muted); }
+.policy p strong { color: var(--text); }
+.policy code { color: var(--accent); }
 
 @media (max-width: 600px) {
   .hero h1 { font-size: 2.2rem; }
