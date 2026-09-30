@@ -107,10 +107,18 @@ winget install microsoft.winappcli --source winget
 打包（流程已固化在 `scripts/build-msix.ps1`）：
 
 ```powershell
-.\scripts\build-msix.ps1 -Version 0.1.0.0 -Publisher "CN=xinyuemoli"
+.\scripts\build-msix.ps1 -Version 1.0.0.0 `
+    -PackageName     "<Package/Identity/Name>" `
+    -Publisher       "<Package/Identity/Publisher>" `
+    -PublisherDisplay "<Package/Properties/PublisherDisplayName>"
 ```
 
-产物：`src-tauri\target\msix\SpaceRecycle_0.1.0.0_x64.msix`（约 2.7 MB，已用开发证书签名）。
+产物：`src-tauri\target\msix\SpaceRecycle_1.0.0.0_x64.msix`（约 2.7 MB，已用开发证书签名）。
+
+三个身份值取自 Partner Center 的 **Product identity**（产品标识）面板，**必须逐字符一致**（官方明确：值区分大小写，空格和标点都要对上），否则上传会被拒。
+
+> ⚠️ **版本号规则（容易踩坑）**：四段版本号中，**第一段不能为 0**，**第四段必须留 0**（第四段由 Store 保留）。
+> 所以 `0.1.0.0` 会被 Store 直接拒绝，必须写成 `1.0.0.0` 这类。脚本已内置校验，填错会立即报错而不会产出一个用不了的包。
 
 脚本四步：`cargo build --release`（`-SkipBuild` 可跳过）→ `winapp manifest generate` 生成全部图标资产 → 套用 `src-tauri/msix/Package.appxmanifest.template` → `winapp package` 出包签名。
 
