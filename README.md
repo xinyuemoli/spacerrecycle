@@ -37,7 +37,7 @@ There is **no background auto-cleanup, no scheduled task, no boot-time scan**. T
 ## Download
 
 - **[GitHub Releases](https://github.com/xinyuemoli/spacerrecycle/releases)** — Windows 10 1809+ / Windows 11 (requires the WebView2 runtime, preinstalled on Windows 11 and most Windows 10 systems).
-- **Microsoft Store** — coming soon.
+- **[Microsoft Store](https://apps.microsoft.com/detail/9N8NBM3QKNQD)** — Store ID `9N8NBM3QKNQD` (`ms-windows-store://pdp/?productid=9N8NBM3QKNQD`). Windows 10 1809+ / Windows 11; WebView2 runtime required.
 
 ## Build from source
 
