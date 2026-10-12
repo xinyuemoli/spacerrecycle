@@ -18,7 +18,12 @@ echo === building SpaceRecycleShell.dll ===
 REM /utf-8: the sources contain Chinese menu strings. Without it MSVC reads
 REM them in the system code page (936 here), mangles the string literals and
 REM fails to parse the file at all.
+REM
+REM _WIN32_WINNT=0x0601 (Windows 7): the verification VM runs Windows 7 SP1, and
+REM restricting the headers to the Win7 API set turns "we accidentally called
+REM something newer" into a compile error instead of a DLL that fails to load.
 cl /nologo /LD /MT /O2 /EHsc /W3 /utf-8 /DUNICODE /D_UNICODE ^
+   /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 ^
    src\SpaceRecycleShell.cpp ^
    /link /DEF:src\SpaceRecycleShell.def /OUT:bin\SpaceRecycleShell.dll ^
    ole32.lib shell32.lib shlwapi.lib advapi32.lib user32.lib
@@ -26,6 +31,7 @@ if errorlevel 1 exit /b 1
 
 echo === building menutest.exe ===
 cl /nologo /MT /O2 /EHsc /W3 /utf-8 /DUNICODE /D_UNICODE ^
+   /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 ^
    tools\menutest.cpp ^
    /link /OUT:bin\menutest.exe ole32.lib shell32.lib shlwapi.lib
 if errorlevel 1 exit /b 1

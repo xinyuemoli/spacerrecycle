@@ -11,7 +11,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$dll = Join-Path $PSScriptRoot 'bin\SpaceRecycleShell.dll'
+# $PSScriptRoot needs PowerShell 3.0. The verification VM is Windows 7 SP1,
+# which ships 2.0, so the directory is derived the way 2.0 can do it.
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+$dll = Join-Path $scriptDir 'bin\SpaceRecycleShell.dll'
 $clsid = '{7A5E3C21-9B4D-4E8F-A6C2-1D3E5F7A9B0C}'
 
 if ($Action -eq 'status') {
@@ -45,4 +48,4 @@ if ($proc.ExitCode -ne 0) {
 }
 Write-Host "$Action ok"
 Write-Host ""
-& $PSCommandPath -Action status
+& $MyInvocation.MyCommand.Definition -Action status
