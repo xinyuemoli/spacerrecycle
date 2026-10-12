@@ -38,6 +38,16 @@ const state = {
   menu: null,               // { path, name, level, x, y } right-click menu anchor
   onedrive: null,           // { available, roots } from the backend, null until asked
   entitlement: null,        // subscription state, loaded when Settings opens
+  /**
+   * OneDrive account + cloud quota.
+   *
+   * `null` until asked; `{ connected, quota, detail }` afterwards. Kept
+   * separate from `onedrive` (the local Files On-Demand roots), because the
+   * local release feature works with no account at all.
+   */
+  onedriveAccount: null,
+  /** A sign-in in progress: { userCode, verificationUri, intervalSecs, status, detail }. */
+  connect: null,
 };
 
 export { state };
@@ -55,6 +65,35 @@ const PROGRESS_THROTTLE_MS = 120;
  */
 export const PAGE_SIZE = 400;
 let progressTimer = null;
+
+/**
+ * The device-code poll timer.
+ *
+ * Owned here rather than by the view: the view is rebuilt with innerHTML on
+ * every state change, so a timer held by it would be orphaned and keep polling
+ * forever.
+ */
+let pollTimer = null;
+
+function clearPoll() {
+  if (pollTimer !== null) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function schedulePoll(seconds) {
+  clearPoll();
+  pollTimer = setTimeout(() => {
+    pollTimer = null;
+    actions.pollConnect();
+  }, Math.max(1, seconds) * 1000);
+}
+
+/** Stop any in-flight device-code polling. Used on teardown. */
+export function stopPolling() {
+  clearPoll();
+}
 
 /**
  * Update only the progress readout.
@@ -818,9 +857,118 @@ export const actions = {
     // opens rather than on every launch: an entitlement check on a packaged
     // build is a Store round trip.
     await actions.loadEntitlement();
+    await actions.loadAccount();
     render();
   },
-  closeSettings() { state.showSettings = false; render(); },
+  closeSettings() {
+    state.showSettings = false;
+    // A sign-in left half-finished would keep polling in the background and
+    // start firing toasts at the user from another tab.
+    actions.cancelConnect();
+    render();
+  },
+
+  // ---------- OneDrive account ----------
+
+  /** Read the linked-account state and cloud quota. */
+  async loadAccount() {
+    try {
+      state.onedriveAccount = await invoke("graph_account_status");
+    } catch (_) {
+      // A failed status read is not worth a toast on every Settings visit;
+      // the card simply reports that nothing is linked.
+      state.onedriveAccount = { connected: false, quota: null, detail: "" };
+    }
+  },
+
+  /** Begin a device-code sign-in and start polling. */
+  async startConnect() {
+    if (state.connect) return;
+    try {
+      const info = await invoke("graph_connect_start");
+      state.connect = {
+        userCode: info.userCode,
+        verificationUri: info.verificationUri,
+        intervalSecs: Math.max(1, info.intervalSecs || 5),
+        status: "pending",
+        detail: "",
+      };
+      render();
+      schedulePoll(state.connect.intervalSecs);
+    } catch (e) {
+      // The backend rejects this when no Azure client ID is configured, and
+      // that message is the only thing telling the user what to fix.
+      toast(String(e), "err");
+    }
+  },
+
+  /** One poll of a sign-in in progress. */
+  async pollConnect() {
+    if (!state.connect) return;
+    let r;
+    try {
+      r = await invoke("graph_connect_poll");
+    } catch (e) {
+      state.connect = null;
+      clearPoll();
+      toast(t(state.lang, "acc.fail", { e }), "err");
+      render();
+      return;
+    }
+    // The user may have closed Settings while the request was in flight.
+    if (!state.connect) return;
+
+    if (r.status === "pending" || r.status === "slow_down" || r.status === "error") {
+      state.connect.status = r.status;
+      state.connect.detail = r.detail || "";
+      if (r.intervalSecs) state.connect.intervalSecs = r.intervalSecs;
+      render();
+      schedulePoll(state.connect.intervalSecs);
+      return;
+    }
+
+    clearPoll();
+    state.connect = null;
+    if (r.status === "connected") {
+      state.onedriveAccount = { connected: true, quota: r.quota || null, detail: "" };
+      toast(t(state.lang, "acc.connected"), "ok");
+    } else {
+      toast(t(state.lang, "acc.denied", { reason: r.detail || r.status }), "err");
+    }
+    render();
+  },
+
+  /** Abandon a sign-in in progress. */
+  cancelConnect() {
+    if (!state.connect) return;
+    clearPoll();
+    state.connect = null;
+    invoke("graph_connect_cancel").catch(() => { /* nothing to clean up */ });
+  },
+
+  async signOut() {
+    clearPoll();
+    state.connect = null;
+    try {
+      await invoke("graph_sign_out");
+    } catch (e) {
+      toast(t(state.lang, "acc.fail", { e }), "err");
+    }
+    state.onedriveAccount = { connected: false, quota: null, detail: "" };
+    render();
+  },
+
+  async copyConnectLink() {
+    const url = state.connect && state.connect.verificationUri;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast(t(state.lang, "acc.copied"), "ok");
+    } catch (_) {
+      // Clipboard access can be denied; the URL is on screen either way.
+      toast(t(state.lang, "acc.copyFail"), "err");
+    }
+  },
 
   /**
    * Read the current subscription state.

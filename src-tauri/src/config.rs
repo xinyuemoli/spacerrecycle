@@ -25,6 +25,12 @@ pub struct Config {
     /// Store. Documented as such because it is also the documented way to
     /// exercise the subscriber path on a machine with no Store identity.
     pub dev_subscriber_override: bool,
+    /// Azure application (client) ID used for the OneDrive device-code flow.
+    ///
+    /// Empty disables account linking entirely, which is the shipping default:
+    /// a build with no registered application must not offer a sign-in button
+    /// that cannot work.
+    pub graph_client_id: String,
 }
 
 impl Default for Config {
@@ -38,6 +44,7 @@ impl Default for Config {
             extra_excluded_roots: Vec::new(),
             subscription_addon_store_id: String::new(),
             dev_subscriber_override: false,
+            graph_client_id: String::new(),
         }
     }
 }

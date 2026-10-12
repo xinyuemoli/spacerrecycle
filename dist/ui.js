@@ -3,7 +3,7 @@ import {
   selectedItems, selectionTotals, filteredFindings, categoryTotals,
   dirTotals, findingsInDir,
   categoryLabel, riskLabelOf, RISK_DOT, isExpired, ageDays, PAGE_SIZE,
-  importanceOf, IMPORTANCE_LEVELS, selectable,
+  importanceOf, IMPORTANCE_LEVELS, selectable, stopPolling,
 } from "./state.js";
 import { listen } from "./api.js";
 import { t } from "./i18n.js";
@@ -776,6 +776,80 @@ function subscriptionCard() {
     </div>`;
 }
 
+/**
+ * OneDrive account and cloud quota.
+ *
+ * Three states, and the interesting one is the middle: a device-code sign-in
+ * happens in the user's own browser, so the app is waiting on something it
+ * cannot observe. The code is shown large and the URL as selectable text rather
+ * than a link, because navigating the app's own webview to Microsoft's sign-in
+ * page would replace the app with a web page.
+ */
+function accountCard() {
+  if (state.connect) return connectPanel(state.connect);
+  const a = state.onedriveAccount;
+  if (!a) return "";
+
+  if (!a.connected) {
+    return h`
+      <h2 class="section">${T("acc.title")}</h2>
+      <div class="card mb">
+        <div class="setrow">
+          <div>
+            <div class="setlabel">${T("acc.notConnected")}</div>
+            <div class="faint" style="font-size:11px;margin-top:4px">${T("acc.hint")}</div>
+          </div>
+          <button class="sm primary" data-act="acc-connect">${T("acc.connect")}</button>
+        </div>
+        ${a.detail ? `<div class="faint mt" style="font-size:11px">${esc(a.detail)}</div>` : ""}
+      </div>`;
+  }
+
+  const q = a.quota;
+  const pct = q && q.totalBytes ? Math.min(100, Math.round((q.usedBytes / q.totalBytes) * 100)) : 0;
+  return h`
+    <h2 class="section">${T("acc.title")}</h2>
+    <div class="card mb">
+      <div class="setrow">
+        <div>
+          <div class="setlabel"><span class="tag safe">${T("acc.connected")}</span></div>
+          ${q
+            ? `<div class="faint" style="font-size:11px;margin-top:6px">
+                 ${T("acc.quota", { used: fmtBytes(q.usedBytes), total: fmtBytes(q.totalBytes), remaining: fmtBytes(q.remainingBytes) })}
+               </div>
+               <div class="qbar"><span style="width:${pct}%"></span></div>
+               <div class="faint" style="font-size:11px">${T("acc.state", { state: esc(q.state) })}</div>`
+            : `<div class="faint" style="font-size:11px;margin-top:6px">${T("acc.quotaUnavailable")}</div>
+               ${a.detail ? `<div class="faint" style="font-size:11px">${esc(a.detail)}</div>` : ""}`}
+        </div>
+        <button class="sm" data-act="acc-signout">${T("acc.signOut")}</button>
+      </div>
+      <div class="faint mt" style="font-size:11px">${T("acc.scopeNote")}</div>
+    </div>`;
+}
+
+/** The in-progress device-code sign-in. */
+function connectPanel(c) {
+  const status = c.status === "pending" ? T("acc.waiting")
+    : c.status === "slow_down" ? T("acc.slowDown")
+    : c.status === "error" ? T("acc.retrying")
+    : T("acc.waiting");
+  return h`
+    <h2 class="section">${T("acc.title")}</h2>
+    <div class="card mb">
+      <div class="setlabel">${T("acc.enterCode")}</div>
+      <div class="acc-code">${esc(c.userCode)}</div>
+      <div class="faint" style="font-size:11px">${T("acc.openAt")}</div>
+      <div class="mono acc-url">${esc(c.verificationUri)}</div>
+      <div class="toolbar mt" style="margin-bottom:0">
+        <button class="sm" data-act="acc-copy">${T("acc.copyLink")}</button>
+        <button class="sm" data-act="acc-cancel">${T("acc.cancel")}</button>
+        <span class="faint" style="font-size:11px">${status}</span>
+      </div>
+      ${c.detail ? `<div class="faint mt" style="font-size:11px">${esc(c.detail)}</div>` : ""}
+    </div>`;
+}
+
 function settingsView() {
   const c = state.config || {};
   const log = state.auditLog || [];
@@ -828,6 +902,8 @@ function settingsView() {
     </div>
 
     ${subscriptionCard()}
+
+    ${accountCard()}
 
     <h2 class="section">${T("set.location")}</h2>
     <div class="card mb">
@@ -925,6 +1001,10 @@ function bind() {
     }
     else if (act === "close-menu") actions.closeMenu();
     else if (act === "refresh-entitlement") actions.refreshEntitlement();
+    else if (act === "acc-connect") actions.startConnect();
+    else if (act === "acc-cancel") actions.cancelConnect();
+    else if (act === "acc-copy") actions.copyConnectLink();
+    else if (act === "acc-signout") actions.signOut();
     else if (act === "goto-cat") {
       // Jump to the findings tab, filtered to this one category's risk tier.
       // The two branches used to be identical ("all" either way), which
@@ -1005,6 +1085,9 @@ export function dispose() {
     document.removeEventListener("keydown", menuKeyHandler);
     menuKeyHandler = null;
   }
+  // The device-code poll timer lives in state.js; leaving it running after
+  // teardown would keep calling a backend that is no longer listening.
+  stopPolling();
 }
 let unlistenProgress = null;
 let menuKeyHandler = null;

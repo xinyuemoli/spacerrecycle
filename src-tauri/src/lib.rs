@@ -29,7 +29,7 @@ pub mod testing {
     };
 }
 
-use commands::ScanState;
+use commands::{GraphState, ScanState};
 
 /// Run a cleanup that was handed over by an elevated relaunch, then exit.
 ///
@@ -64,6 +64,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(ScanState::default())
+        .manage(GraphState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_volumes,
             commands::get_config,
@@ -90,6 +91,11 @@ pub fn run() {
             commands::onedrive_status,
             commands::get_entitlement,
             commands::refresh_entitlement,
+            commands::graph_connect_start,
+            commands::graph_connect_poll,
+            commands::graph_connect_cancel,
+            commands::graph_account_status,
+            commands::graph_sign_out,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SpaceRecycle");

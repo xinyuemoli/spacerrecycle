@@ -487,3 +487,39 @@ tr.imp-row-low td:first-child { box-shadow: inset 3px 0 0 var(--green); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------- OneDrive account ---------- */
+.acc-code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--accent);
+  margin: 8px 0 12px;
+  user-select: all;
+}
+.acc-url {
+  font-size: 12px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  user-select: all;
+  word-break: break-all;
+}
+/* Quota usage bar, matching the volume cards' visual language. */
+.qbar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  overflow: hidden;
+  margin: 8px 0 4px;
+  max-width: 420px;
+}
+.qbar span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+}

@@ -77,6 +77,7 @@ node dist/_test_settings.mjs
 node dist/_test_importance.mjs
 node dist/_test_cloud.mjs
 node dist/_test_subscription.mjs
+node dist/_test_account.mjs
 
 # These two drive a real headless browser and need `playwright` + Chromium.
 # Without it they print SKIP and exit 0 rather than failing.

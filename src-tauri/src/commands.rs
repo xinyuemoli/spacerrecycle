@@ -34,6 +34,205 @@ pub struct ScanState {
     pub current: Mutex<Option<Arc<ScanCounters>>>,
 }
 
+/// Live OneDrive-link state.
+///
+/// `session` is the sign-in the user has started and not finished; `access` is
+/// the short-lived access token cache. Both are in-memory only: a half-finished
+/// sign-in must not survive a restart, and an access token is not worth writing
+/// to disk when a refresh token already is.
+#[derive(Default)]
+pub struct GraphState {
+    pub session: Mutex<Option<crate::cloud::account::Session>>,
+    pub access: crate::cloud::account::AccessCache,
+}
+
+/// The code the user must type at Microsoft's sign-in page.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectInfo {
+    pub user_code: String,
+    pub verification_uri: String,
+    pub interval_secs: i64,
+    pub expires_in: i64,
+}
+
+/// One poll's outcome.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectPoll {
+    /// `pending` | `slow_down` | `denied` | `connected` | `error`.
+    pub status: String,
+    pub detail: String,
+    /// Seconds the caller should wait before polling again.
+    pub interval_secs: i64,
+    pub quota: Option<crate::cloud::graph::Quota>,
+}
+
+fn graph_config() -> Result<Config, String> {
+    let cfg = Config::load();
+    if cfg.graph_client_id.trim().is_empty() {
+        return Err(
+            "未配置 Azure 应用（client）ID，无法连接 OneDrive。请在设置中填入 graphClientId。"
+                .to_string(),
+        );
+    }
+    Ok(cfg)
+}
+
+/// Start a OneDrive sign-in and return the code to display.
+#[tauri::command]
+pub async fn graph_connect_start(state: State<'_, GraphState>) -> Result<ConnectInfo, String> {
+    let cfg = graph_config()?;
+    let now = crate::license::now_unix();
+    let client_id = cfg.graph_client_id.clone();
+    let session = offload(move || {
+        crate::cloud::account::begin(&crate::cloud::graph::WinHttp, &client_id, now)
+    })
+    .await?;
+
+    let info = ConnectInfo {
+        user_code: session.user_code.clone(),
+        verification_uri: session.verification_uri.clone(),
+        interval_secs: session.interval_secs,
+        expires_in: (session.expires_unix - now).max(0),
+    };
+    *state
+        .session
+        .lock()
+        .map_err(|_| "graph state lock poisoned".to_string())? = Some(session);
+    Ok(info)
+}
+
+/// Poll a sign-in in progress. The UI calls this on the returned interval.
+#[tauri::command]
+pub async fn graph_connect_poll(state: State<'_, GraphState>) -> Result<ConnectPoll, String> {
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| "graph state lock poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| "没有进行中的 OneDrive 登录".to_string())?;
+
+    let now = crate::license::now_unix();
+    let probe = session.clone();
+    let outcome = offload(move || {
+        crate::cloud::account::poll(&crate::cloud::graph::WinHttp, &probe, now)
+    })
+    .await;
+
+    use crate::cloud::graph::Poll;
+    match outcome {
+        // Keep the session: the user simply has not finished signing in.
+        Poll::Pending => Ok(ConnectPoll {
+            status: "pending".into(),
+            detail: String::new(),
+            interval_secs: session.interval_secs,
+            quota: None,
+        }),
+        // Back off exactly as asked; polling faster earns a ban.
+        Poll::SlowDown => Ok(ConnectPoll {
+            status: "slow_down".into(),
+            detail: String::new(),
+            interval_secs: (session.interval_secs + 5).min(60),
+            quota: None,
+        }),
+        Poll::Denied(reason) => {
+            *state.session.lock().map_err(|_| "graph state lock poisoned".to_string())? = None;
+            Ok(ConnectPoll {
+                status: "denied".into(),
+                detail: reason,
+                interval_secs: 0,
+                quota: None,
+            })
+        }
+        // Transport trouble: retryable, so the session survives.
+        Poll::TransportError(e) => Ok(ConnectPoll {
+            status: "error".into(),
+            detail: e,
+            interval_secs: session.interval_secs,
+            quota: None,
+        }),
+        Poll::Ready(tokens) => {
+            *state.session.lock().map_err(|_| "graph state lock poisoned".to_string())? = None;
+            let client_id = session.client_id.clone();
+            let access = Arc::clone(&state.access);
+            let store = crate::cloud::account::DiskAuth;
+            offload(move || {
+                crate::cloud::account::accept(
+                    &tokens,
+                    &client_id,
+                    &store,
+                    &access,
+                )
+            })
+            .await?;
+
+            // The quota is a bonus at this point: the account is linked either
+            // way, and failing to read a number must not undo a sign-in.
+            let access = Arc::clone(&state.access);
+            let quota = offload(move || {
+                crate::cloud::account::status(
+                    &crate::cloud::graph::WinHttp,
+                    &crate::cloud::account::DiskAuth,
+                    &access,
+                    crate::license::now_unix(),
+                )
+                .quota
+            })
+            .await;
+
+            Ok(ConnectPoll {
+                status: "connected".into(),
+                detail: String::new(),
+                interval_secs: 0,
+                quota,
+            })
+        }
+    }
+}
+
+/// Abandon a sign-in in progress.
+#[tauri::command]
+pub fn graph_connect_cancel(state: State<'_, GraphState>) {
+    if let Ok(mut slot) = state.session.lock() {
+        *slot = None;
+    }
+}
+
+/// Account state and cloud quota.
+///
+/// Returns a `Result` because Tauri requires it of async commands that take a
+/// borrowed `State`; `status` itself does not fail - an account problem is
+/// reported inside the value, so the UI can distinguish "not linked" from
+/// "quota temporarily unreadable".
+#[tauri::command]
+pub async fn graph_account_status(
+    state: State<'_, GraphState>,
+) -> Result<crate::cloud::account::AccountStatus, String> {
+    let access = Arc::clone(&state.access);
+    Ok(offload(move || {
+        crate::cloud::account::status(
+            &crate::cloud::graph::WinHttp,
+            &crate::cloud::account::DiskAuth,
+            &access,
+            crate::license::now_unix(),
+        )
+    })
+    .await)
+}
+
+/// Unlink the OneDrive account and forget its credential.
+#[tauri::command]
+pub fn graph_sign_out(state: State<'_, GraphState>) {
+    crate::cloud::account::sign_out(
+        &crate::cloud::account::DiskAuth,
+        &state.access,
+    );
+    if let Ok(mut slot) = state.session.lock() {
+        *slot = None;
+    }
+}
+
 /// One slice of a scan's findings, streamed to the UI over an event rather
 /// than returned as a single giant array.
 #[derive(Clone, serde::Serialize)]
