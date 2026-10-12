@@ -32,6 +32,8 @@ function stub(cmd) {
     case "list_quarantine_batches": return [];
     case "list_importance": return [];
     case "onedrive_status": return { available: false, roots: [] };
+    case "get_entitlement": return { subscriber: false, source: "not_configured", checkedUnix: 0, expiresUnix: null, detail: "" };
+    case "refresh_entitlement": return { subscriber: false, source: "not_configured", checkedUnix: 0, expiresUnix: null, detail: "" };
     case "build_preview": return [];
     case "needs_red_confirmation": return false;
     default: return null;

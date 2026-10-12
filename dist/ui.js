@@ -743,6 +743,39 @@ function batchBody(b) {
 }
 
 // ---------------- Settings ----------------
+
+/**
+ * Subscription status.
+ *
+ * Hidden until the backend has answered, and honest about *why* when the
+ * answer is "no": a user who has paid and is being refused needs the reason
+ * (unconfigured build, Store unreachable, expired) rather than a bare "not
+ * subscribed".
+ */
+function subscriptionCard() {
+  const e = state.entitlement;
+  if (!e) return "";
+  const src = T("sub.src." + e.source);
+  return h`
+    <h2 class="section">${T("sub.title")}</h2>
+    <div class="card mb">
+      <div class="setrow">
+        <div>
+          <div class="setlabel">
+            <span class="tag ${e.subscriber ? "safe" : "userdata"}">
+              ${e.subscriber ? T("sub.active") : T("sub.inactive")}
+            </span>
+          </div>
+          <div class="faint" style="font-size:11px;margin-top:4px">${esc(e.detail)}</div>
+          <div class="faint" style="font-size:11px">${T("sub.source", { src: esc(src) })}</div>
+          ${e.expiresUnix ? `<div class="faint" style="font-size:11px">${T("sub.expires", { date: fmtWhen(e.expiresUnix) })}</div>` : ""}
+        </div>
+        <button class="sm" data-act="refresh-entitlement">${T("sub.recheck")}</button>
+      </div>
+      <div class="faint mt" style="font-size:11px">${T("sub.hint")}</div>
+    </div>`;
+}
+
 function settingsView() {
   const c = state.config || {};
   const log = state.auditLog || [];
@@ -793,6 +826,8 @@ function settingsView() {
         <span class="faint" style="font-size:11px">${T("set.instant")}</span>
       </div>
     </div>
+
+    ${subscriptionCard()}
 
     <h2 class="section">${T("set.location")}</h2>
     <div class="card mb">
@@ -889,6 +924,7 @@ function bind() {
       if (state.menu) actions.clearImportance(state.menu.path);
     }
     else if (act === "close-menu") actions.closeMenu();
+    else if (act === "refresh-entitlement") actions.refreshEntitlement();
     else if (act === "goto-cat") {
       // Jump to the findings tab, filtered to this one category's risk tier.
       // The two branches used to be identical ("all" either way), which

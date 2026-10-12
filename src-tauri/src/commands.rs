@@ -438,6 +438,18 @@ pub async fn onedrive_status() -> crate::cloud::onedrive::Status {
     offload(crate::cloud::onedrive::status).await
 }
 
+/// Current subscription state for the cloud-backup feature.
+#[tauri::command]
+pub async fn get_entitlement() -> crate::license::Entitlement {
+    offload(crate::license::entitlement).await
+}
+
+/// Re-check the subscription, ignoring a fresh cached answer.
+#[tauri::command]
+pub async fn refresh_entitlement() -> crate::license::Entitlement {
+    offload(crate::license::entitlement_forced).await
+}
+
 /// Every importance mark the user has set, most important first.
 ///
 /// The UI keeps this as a path-keyed map and stamps it onto rendered rows, so

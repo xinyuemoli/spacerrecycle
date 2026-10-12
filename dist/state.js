@@ -37,6 +37,7 @@ const state = {
   importanceFilter: "all",  // "all" | level, for the findings toolbar
   menu: null,               // { path, name, level, x, y } right-click menu anchor
   onedrive: null,           // { available, roots } from the backend, null until asked
+  entitlement: null,        // subscription state, loaded when Settings opens
 };
 
 export { state };
@@ -813,9 +814,44 @@ export const actions = {
     state.auditLog = await invoke("read_audit_log", { limit: 200 });
     state.auditPath = await invoke("audit_log_path");
     state.showSettings = true;
+    // Subscription state is only shown here, so it is fetched when this tab
+    // opens rather than on every launch: an entitlement check on a packaged
+    // build is a Store round trip.
+    await actions.loadEntitlement();
     render();
   },
   closeSettings() { state.showSettings = false; render(); },
+
+  /**
+   * Read the current subscription state.
+   *
+   * A missing or failed answer leaves `entitlement` null rather than guessing:
+   * the card is hidden, and the backend still refuses cloud backup on its own.
+   */
+  async loadEntitlement() {
+    try {
+      state.entitlement = await invoke("get_entitlement");
+    } catch (_) {
+      state.entitlement = null;
+    }
+  },
+
+  /** Re-check the subscription, ignoring a fresh cached answer. */
+  async refreshEntitlement() {
+    try {
+      state.entitlement = await invoke("refresh_entitlement");
+      toast(
+        state.entitlement && state.entitlement.subscriber
+          ? t(state.lang, "sub.toastActive")
+          : t(state.lang, "sub.toastInactive"),
+        state.entitlement && state.entitlement.subscriber ? "ok" : ""
+      );
+      return;
+    } catch (e) {
+      toast(t(state.lang, "sub.toastFail", { e }), "err");
+    }
+    render();
+  },
 
   /** Switch the interface language and persist the choice. */
   setLang(lang) {

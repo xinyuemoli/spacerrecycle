@@ -16,6 +16,15 @@ pub struct Config {
     pub quarantine_dir: PathBuf,
     /// Roots to exclude from every scan, in addition to the built-in denylist.
     pub extra_excluded_roots: Vec<PathBuf>,
+    /// Store ID of the subscription add-on that unlocks cloud backup.
+    ///
+    /// Empty means the feature is not on sale yet, which is the shipping
+    /// default: an unconfigured build must not pretend to offer a paid tier.
+    pub subscription_addon_store_id: String,
+    /// Development only: treat this build as subscribed without asking the
+    /// Store. Documented as such because it is also the documented way to
+    /// exercise the subscriber path on a machine with no Store identity.
+    pub dev_subscriber_override: bool,
 }
 
 impl Default for Config {
@@ -27,6 +36,8 @@ impl Default for Config {
             quarantine_expiry_days: 7,
             quarantine_dir: default_quarantine_dir(),
             extra_excluded_roots: Vec::new(),
+            subscription_addon_store_id: String::new(),
+            dev_subscriber_override: false,
         }
     }
 }

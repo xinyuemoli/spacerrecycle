@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod engine;
 pub mod importance;
+pub mod license;
 pub mod log;
 pub mod model;
 pub mod quarantine;
@@ -87,6 +88,8 @@ pub fn run() {
             commands::set_importance,
             commands::clear_importance,
             commands::onedrive_status,
+            commands::get_entitlement,
+            commands::refresh_entitlement,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SpaceRecycle");
