@@ -84,6 +84,66 @@ stream is `v1|important|<unix>`.
 
 ---
 
+# Verification environments
+
+## Windows 11 (host) — registration path
+
+The full COM path is exercised here: `register.ps1 -Action register` writes the
+per-user keys, `CoCreateInstance` finds the class through HKCR, and the submenu
+enumerates with the expected titles and icons.
+
+## Windows 7 SP1 x64 (VM) — behaviour, and the PowerShell 2.0 traps
+
+Verified on a Windows 7 Home Basic x64 guest driven through `vmrun`: the submenu
+titles (by code point), the ADS payload for `重要` → `v1|important|<unix>` and
+`可清理` → `v1|disposable|<unix>`, clearing back to "no stream", the checkmark
+tracking the mark, and **a folder as well as a file**.
+
+Getting there meant fixing four separate Windows 7 incompatibilities, none of
+which announce themselves clearly:
+
+| Trap | Symptom |
+|---|---|
+| `$PSScriptRoot`, `$PSCommandPath` are 3.0+ | script dies resolving its own directory |
+| `Get-CimInstance` is 3.0+ | command not found; `Get-WmiObject` is the fallback |
+| `Set-Content -NoNewline` is 5.0+ | parameter binding fails, **the fixture file is never created** — which then looks exactly like the shell item API rejecting a valid path |
+| `Start-Process -Wait` is broken on 2.0 | throws "the process is not currently running" as soon as a short-lived program exits, with or without `-PassThru` |
+| No .NET 4.0 (CLR 2.0.50727) | `[Environment]::Is64BitOperatingSystem` returns `$null` instead of throwing, so a try/catch guard silently reports a 64-bit guest as 32-bit |
+| `cmd`/`vmrun` append a stray whitespace argument | PowerShell 2.0 binds it to the first positional parameter, overriding the default — a `param` block is not safe in a guest-invoked script |
+
+`register.ps1` therefore calls the DLL's `DllRegisterServer` **in-process**
+instead of shelling out to `regsvr32`, and carries a
+`ValueFromRemainingArguments` sink for the stray argument.
+
+## Why the guest falls back to a direct DLL load
+
+`menutest` normally creates the command through `CoCreateInstance`. Inside this
+VM that returns `REGDB_E_CLASSNOTREG` for a CLSID that is demonstrably present:
+
+```
+running as : sruser
+HKCU\Software\Classes\CLSID\{...}\InprocServer32   -> present, points at the DLL
+HKCR\CLSID\{...}\InprocServer32                    -> open failed rc=2
+```
+
+COM resolves CLSIDs through HKCR, and HKCR merges `HKCU\Software\Classes` only
+for a properly loaded user profile. A process started by VMware's guest
+operations for an account that has never logged on interactively does not get
+that merge. The registration and the DLL are both correct — `DllGetClassObject`
+called by hand returns `S_OK` for our CLSID and `CLASS_E_CLASSNOTAVAILABLE` for a
+wrong one, which is exactly right.
+
+So `menutest` falls back to loading the DLL and calling `DllGetClassObject`
+itself. That is not a workaround for a product bug: the same registration works
+through COM on the host, where the user is logged in normally.
+
+## Overlay slots on the VM
+
+The Windows 7 guest has **2** overlay handlers registered
+(`EnhancedStorageShell`, `SharingPrivate`) against the host's 35. **Thirteen of
+the fifteen slots are free**, which is exactly why overlay development belongs
+there and not on a working desktop.
+
 # Icon overlays: what was measured, and why the obvious design does not work
 
 The natural reading of `IShellIconOverlayIdentifier` is "the handler returns an

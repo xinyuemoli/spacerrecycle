@@ -33,7 +33,7 @@ echo === building menutest.exe ===
 cl /nologo /MT /O2 /EHsc /W3 /utf-8 /DUNICODE /D_UNICODE ^
    /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 ^
    tools\menutest.cpp ^
-   /link /OUT:bin\menutest.exe ole32.lib shell32.lib shlwapi.lib
+   /link /OUT:bin\menutest.exe ole32.lib shell32.lib shlwapi.lib advapi32.lib
 if errorlevel 1 exit /b 1
 
 del /q *.obj 2>nul

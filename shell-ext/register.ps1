@@ -7,7 +7,13 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('register', 'unregister', 'status')]
-    [string]$Action
+    [string]$Action,
+    # Swallows the stray whitespace argument that the cmd/vmrun quoting chain
+    # appends when this is run as `powershell -File register.ps1 -Action ...`.
+    # Without it, PowerShell 2.0 tries to bind that argument positionally and
+    # fails with "no positional parameter found".
+    [Parameter(ValueFromRemainingArguments = $true)]
+    $Ignored
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,17 +41,46 @@ if ($Action -eq 'status') {
 
 if (-not (Test-Path $dll)) { throw "not built yet: $dll  (run build.cmd)" }
 
-# regsvr32 calls the DLL's own DllRegisterServer / DllUnregisterServer, so the
-# registry layout lives in exactly one place - the DLL. It is launched with
-# -Wait because regsvr32 is a GUI-subsystem binary: PowerShell's call operator
-# returns immediately for those, and an exit code read straight afterwards is
-# empty. It does not self-elevate, which is what proves the install really is
-# per-user.
-$args = if ($Action -eq 'register') { @('/s', $dll) } else { @('/s', '/u', $dll) }
-$proc = Start-Process -FilePath 'regsvr32.exe' -ArgumentList $args -PassThru -Wait
-if ($proc.ExitCode -ne 0) {
-    throw "regsvr32 failed with exit code $($proc.ExitCode)"
+# Load the library and call its own DllRegisterServer / DllUnregisterServer, so
+# the registry layout lives in exactly one place - the DLL.
+#
+# regsvr32 would be the conventional route, but it is unusable here for two
+# independent reasons: Start-Process -Wait is broken on PowerShell 2.0 and
+# throws "the process is not currently running" the moment a short-lived program
+# exits, and regsvr32 is a GUI-subsystem binary being started from a session
+# with no interactive desktop. Calling the export in-process avoids both, and
+# returns a real HRESULT instead of an exit code that has to be guessed at.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SrRegister {
+    [DllImport("kernel32", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr LoadLibrary(string path);
+    [DllImport("kernel32", SetLastError=true)]
+    public static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [DllImport("kernel32", SetLastError=true)]
+    public static extern bool FreeLibrary(IntPtr module);
 }
-Write-Host "$Action ok"
+public delegate int DllRegisterServerFn();
+'@
+
+$module = [SrRegister]::LoadLibrary($dll)
+if ($module -eq [IntPtr]::Zero) {
+    throw "LoadLibrary failed for $dll (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+}
+
+$exportName = if ($Action -eq 'register') { 'DllRegisterServer' } else { 'DllUnregisterServer' }
+$address = [SrRegister]::GetProcAddress($module, $exportName)
+if ($address -eq [IntPtr]::Zero) {
+    [SrRegister]::FreeLibrary($module) | Out-Null
+    throw "export not found: $exportName"
+}
+
+$fn = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($address, [DllRegisterServerFn])
+$hr = $fn.Invoke()
+[SrRegister]::FreeLibrary($module) | Out-Null
+
+if ($hr -ne 0) { throw "$exportName returned 0x{0:X8}" -f $hr }
+Write-Host "$exportName ok (hr=0)"
 Write-Host ""
 & $MyInvocation.MyCommand.Definition -Action status
