@@ -5,4 +5,5 @@
 //! reclaims real space with no account, no network request, and no API key.
 //! The Graph-backed quota and upload features live elsewhere and are opt-in.
 
+pub mod graph;
 pub mod onedrive;

@@ -2,7 +2,9 @@
 //! layer: the product is Windows-only by design.
 
 pub mod cloudfile;
+pub mod dpapi;
 pub mod elevate;
+pub mod http;
 pub mod ntfs;
 pub mod volume;
 
