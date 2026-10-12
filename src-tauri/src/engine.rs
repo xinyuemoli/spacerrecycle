@@ -40,6 +40,14 @@ pub struct CleanupReport {
     pub dehydrate_requested_bytes: u64,
     /// Files skipped because the user had pinned them.
     pub dehydrate_pinned_files: u64,
+    /// Paths uploaded to OneDrive and then removed locally.
+    pub backed_up: Vec<String>,
+    /// Bytes confirmed uploaded before the local copies were removed.
+    pub backup_bytes: u64,
+    /// Paths whose upload failed and which were quarantined locally instead.
+    /// Not a failure - the space was still reclaimed, nothing was destroyed -
+    /// but the user asked for a cloud copy and did not get one.
+    pub backup_fallbacks: Vec<String>,
     /// True when at least one item failed specifically because the process
     /// lacked permission. The UI uses this to offer elevation instead of
     /// silently reporting a partial cleanup.
@@ -94,6 +102,7 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
             Disposition::Purge => "purge",
             Disposition::Quarantine => "quarantine",
             Disposition::Dehydrate => "dehydrate",
+            Disposition::CloudBackup => "cloud_backup",
         };
         let e = groups.entry(key).or_insert((0, 0, 0, BTreeMap::new(), false));
         e.0 += 1;
@@ -108,9 +117,10 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
         }
     }
 
-    // Purge first: it is the irreversible one and deserves the eye. Releasing a
-    // local copy goes last - it is the only group here that destroys nothing.
-    let order = ["purge", "quarantine", "dehydrate"];
+    // Purge first: it is the irreversible one and deserves the eye. A cloud
+    // backup ranks next - the local copy still goes away, it is just kept
+    // somewhere else. Releasing a local copy comes last: it destroys nothing.
+    let order = ["purge", "cloud_backup", "quarantine", "dehydrate"];
     order
         .iter()
         .filter_map(|k| {
@@ -118,6 +128,7 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
                 let disposition = match *k {
                     "purge" => Disposition::Purge,
                     "quarantine" => Disposition::Quarantine,
+                    "cloud_backup" => Disposition::CloudBackup,
                     _ => Disposition::Dehydrate,
                 };
                 PreviewGroup {
@@ -131,6 +142,19 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
             })
         })
         .collect()
+}
+
+/// Whether a path is a directory, re-read from the filesystem.
+///
+/// The request carries an `is_dir` captured at scan time, and the client could
+/// have sent anything. A wrong answer fails safely in every call site (removing
+/// a directory as a file, or the reverse, errors out), but a stat is cheap and
+/// removes the question entirely - the deletion layer should not depend on the
+/// caller's description of what it is pointing at.
+fn is_dir_now(path: &Path, fallback: bool) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.is_dir())
+        .unwrap_or(fallback)
 }
 
 /// Whether a user-assigned importance level forbids a disposition.
@@ -173,6 +197,34 @@ pub fn needs_red_confirmation(items: &[SelectedItem]) -> bool {
         .any(|i| i.disposition == Disposition::Purge && i.finding.category.risk() == RiskTier::UserData)
 }
 
+/// Everything the pipeline needs to know about cloud backup.
+///
+/// Defaults to "unavailable": a caller that does not explicitly wire this up
+/// gets no cloud backup, and any item that asks for one is blocked with a
+/// reason rather than silently treated as something else.
+#[derive(Default)]
+pub struct CloudContext<'a> {
+    /// Only subscribers may use [`Disposition::CloudBackup`].
+    pub subscriber: bool,
+    /// Where an upload goes. `None` means the feature cannot run here - for
+    /// instance in the elevated helper process, which has no UI with which to
+    /// complete a sign-in.
+    pub sink: Option<&'a dyn crate::cloud::backup::BackupSink>,
+    /// Folder the batch is written under. Generated when empty.
+    pub batch_id: String,
+}
+
+impl CloudContext<'_> {
+    fn batch(&self) -> String {
+        if self.batch_id.is_empty() {
+            format!("batch-{}", uuid::Uuid::new_v4())
+        } else {
+            self.batch_id.clone()
+        }
+    }
+}
+
+/// Run a cleanup with the annotations loaded from disk.
 pub fn run_cleanup(req: CleanupRequest, cfg: &crate::config::Config) -> CleanupReport {
     // Read the user's annotations once per run rather than per item: the store
     // is a JSON file on disk, and a batch of ten thousand findings would
@@ -192,16 +244,28 @@ pub fn run_cleanup_with_marks(
     cfg: &crate::config::Config,
     marks: &crate::importance::Store,
 ) -> CleanupReport {
+    run_cleanup_full(req, cfg, marks, &CloudContext::default())
+}
+
+/// The pipeline, with every external dependency injected.
+pub fn run_cleanup_full(
+    req: CleanupRequest,
+    cfg: &crate::config::Config,
+    marks: &crate::importance::Store,
+    cloud: &CloudContext<'_>,
+) -> CleanupReport {
     let mut report = CleanupReport::default();
 
     let mut to_purge: Vec<&SelectedItem> = Vec::new();
     let mut to_quarantine: Vec<&SelectedItem> = Vec::new();
     let mut to_dehydrate: Vec<&SelectedItem> = Vec::new();
+    let mut to_backup: Vec<&SelectedItem> = Vec::new();
     for item in &req.items {
         match item.disposition {
             Disposition::Purge => to_purge.push(item),
             Disposition::Quarantine => to_quarantine.push(item),
             Disposition::Dehydrate => to_dehydrate.push(item),
+            Disposition::CloudBackup => to_backup.push(item),
         }
     }
 
@@ -262,7 +326,7 @@ pub fn run_cleanup_with_marks(
         // old enough when scanned may have been touched since, and purge is
         // irreversible. (Quarantine is restorable, so it is deliberately not
         // gated here.)
-        if !crate::safety::age_gate_passes(path, item.finding.is_dir, item.finding.category, cfg) {
+        if !crate::safety::age_gate_passes(path, is_dir_now(path, item.finding.is_dir), item.finding.category, cfg) {
             crate::log::record(
                 crate::log::Action::Purge,
                 &item.finding.path,
@@ -294,7 +358,7 @@ pub fn run_cleanup_with_marks(
                 continue;
             }
         }
-        match crate::quarantine::ops::purge(path, item.finding.is_dir) {
+        match crate::quarantine::ops::purge(path, is_dir_now(path, item.finding.is_dir)) {
             Ok(()) => {
                 crate::log::record_disposition(
                     Disposition::Purge,
@@ -317,6 +381,142 @@ pub fn run_cleanup_with_marks(
                     path: item.finding.path.clone(),
                     reason: e,
                 });
+            }
+        }
+    }
+
+    // Cloud backup: upload, confirm, and only then remove the local copy.
+    //
+    // An item that cannot be uploaded is never deleted. It is handed to the
+    // quarantine pass below instead, so a network failure costs the user a
+    // trip to the quarantine tab rather than their data.
+    let mut backup_fallback: Vec<&SelectedItem> = Vec::new();
+    if !to_backup.is_empty() {
+        let batch = cloud.batch();
+        for item in &to_backup {
+            let path = Path::new(&item.finding.path);
+
+            if !item.finding.category.allows_cloud_backup() {
+                // Uploading garbage to the user's cloud spends their quota to
+                // preserve something they already decided to throw away.
+                crate::log::record(
+                    crate::log::Action::CloudBackup,
+                    &item.finding.path,
+                    item.finding.on_disk_size,
+                    "已阻止：该类别不支持云端备份",
+                );
+                report.blocked.push(BlockedItem {
+                    path: item.finding.path.clone(),
+                    reason: "this category is not a meaningful cloud-backup target".into(),
+                });
+                continue;
+            }
+            // The subscription gate is enforced here, not in the UI: the
+            // frontend ships the disposition across IPC and could ask for a
+            // paid feature it has not paid for.
+            if !cloud.subscriber {
+                crate::log::record(
+                    crate::log::Action::CloudBackup,
+                    &item.finding.path,
+                    item.finding.on_disk_size,
+                    "已阻止：云端备份需要有效订阅",
+                );
+                report.blocked.push(BlockedItem {
+                    path: item.finding.path.clone(),
+                    reason: "cloud backup requires an active subscription".into(),
+                });
+                continue;
+            }
+            let Some(sink) = cloud.sink else {
+                crate::log::record(
+                    crate::log::Action::CloudBackup,
+                    &item.finding.path,
+                    item.finding.on_disk_size,
+                    "已阻止：此运行环境无法上传",
+                );
+                report.blocked.push(BlockedItem {
+                    path: item.finding.path.clone(),
+                    reason: "cloud backup is unavailable in this instance".into(),
+                });
+                continue;
+            };
+            if !crate::safety::is_allowed(path, cfg) {
+                crate::log::record(
+                    crate::log::Action::CloudBackup,
+                    &item.finding.path,
+                    item.finding.on_disk_size,
+                    "已阻止：路径在保护名单中",
+                );
+                report.blocked.push(BlockedItem {
+                    path: item.finding.path.clone(),
+                    reason: "path is on the protected list".into(),
+                });
+                continue;
+            }
+            if let Some(level) = marks.get(path) {
+                if let Some(reason) = importance_block(level, Disposition::CloudBackup) {
+                    crate::log::record(
+                        crate::log::Action::CloudBackup,
+                        &item.finding.path,
+                        item.finding.on_disk_size,
+                        "已阻止：用户标记的重要级别不允许",
+                    );
+                    report.blocked.push(BlockedItem {
+                        path: item.finding.path.clone(),
+                        reason: reason.to_string(),
+                    });
+                    continue;
+                }
+            }
+
+            match sink.upload(path, is_dir_now(path, item.finding.is_dir), &batch) {
+                Ok(bytes) => {
+                    // The upload is confirmed. Only now may the local copy go.
+                    match crate::quarantine::ops::purge(path, is_dir_now(path, item.finding.is_dir)) {
+                        Ok(()) => {
+                            crate::log::record_disposition(
+                                Disposition::CloudBackup,
+                                &item.finding.path,
+                                bytes,
+                                true,
+                            );
+                            report.backed_up.push(item.finding.path.clone());
+                            report.backup_bytes += bytes;
+                        }
+                        Err(e) => {
+                            // The data is safe in the cloud, so this is not a
+                            // loss - but the space was not reclaimed, and
+                            // reporting success would claim otherwise.
+                            crate::log::record_disposition(
+                                Disposition::CloudBackup,
+                                &item.finding.path,
+                                0,
+                                false,
+                            );
+                            report.failed.push(BlockedItem {
+                                path: item.finding.path.clone(),
+                                reason: format!(
+                                    "uploaded to OneDrive, but the local copy could not be removed: {e}"
+                                ),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    crate::log::record_disposition(
+                        Disposition::CloudBackup,
+                        &item.finding.path,
+                        0,
+                        false,
+                    );
+                    // Hand it to the quarantine pass rather than leaving it
+                    // where it was: the user asked for the space back, and a
+                    // local quarantine gives it to them without risking the
+                    // data.
+                    report.backup_fallbacks.push(item.finding.path.clone());
+                    backup_fallback.push(item);
+                    let _ = e;
+                }
             }
         }
     }
@@ -374,6 +574,10 @@ pub fn run_cleanup_with_marks(
         }
         to_move.push(item);
     }
+    // Items whose cloud upload failed are quarantined instead. They were already
+    // checked against the denylist in the cloud pass, so they skip it here.
+    to_move.extend(backup_fallback);
+
     let qfindings: Vec<Finding> = to_move.iter().map(|i| i.finding.clone()).collect();
     if !qfindings.is_empty() {
         match crate::quarantine::ops::quarantine_items(&qfindings, cfg) {
@@ -865,5 +1069,382 @@ mod tests {
         // it without reading, which is exactly what it guards.
         let items = vec![item("C:/Users/me/OneDrive/x", Category::CloudPlaceholder, Disposition::Dehydrate)];
         assert!(!needs_red_confirmation(&items));
+    }
+
+    // ---------- cloud backup ----------
+
+    /// Records what it was asked to upload, and can be made to fail.
+    #[derive(Default)]
+    struct FakeSink {
+        calls: std::sync::Mutex<Vec<(String, bool, String)>>,
+        /// Whether the source still existed at the moment of upload. This is
+        /// the evidence for the module's central invariant.
+        existed_at_upload: std::sync::Mutex<Vec<bool>>,
+        fail: bool,
+        bytes: u64,
+    }
+
+    impl FakeSink {
+        fn ok() -> Self {
+            FakeSink { bytes: 1024, ..Default::default() }
+        }
+        fn failing() -> Self {
+            FakeSink { fail: true, ..Default::default() }
+        }
+        fn calls(&self) -> Vec<(String, bool, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::cloud::backup::BackupSink for FakeSink {
+        fn upload(&self, path: &Path, is_dir: bool, batch: &str) -> Result<u64, String> {
+            // Recorded *before* anything else: if the engine ever deleted the
+            // file first, this is what catches it.
+            self.existed_at_upload
+                .lock()
+                .unwrap()
+                .push(path.exists());
+            self.calls
+                .lock()
+                .unwrap()
+                .push((path.to_string_lossy().to_string(), is_dir, batch.to_string()));
+            if self.fail {
+                Err("simulated upload failure".to_string())
+            } else {
+                Ok(self.bytes)
+            }
+        }
+        fn describe(&self) -> String {
+            "fake".to_string()
+        }
+    }
+
+    fn scratch(tag: &str) -> (std::path::PathBuf, crate::config::Config) {
+        let dir = std::env::temp_dir().join(format!("sr-cb-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.quarantine_dir = dir.join("quarantine");
+        (dir, cfg)
+    }
+
+    /// The headline invariant: the local copy is removed only after the upload
+    /// has been confirmed.
+    #[test]
+    fn a_cloud_backup_uploads_before_it_removes_anything() {
+        let (dir, cfg) = scratch("order");
+        let target = dir.join("project");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.txt"), b"data").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext {
+            subscriber: true,
+            sink: Some(&sink),
+            batch_id: "batch-1".to_string(),
+        };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::CloudBackup)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert_eq!(report.backed_up.len(), 1, "the item was not backed up");
+        assert_eq!(report.backup_bytes, 1024);
+        assert!(!target.exists(), "the local copy survived a confirmed upload");
+        assert_eq!(
+            sink.existed_at_upload.lock().unwrap().as_slice(),
+            &[true],
+            "the file was gone before the upload started"
+        );
+        // The fixture claims `is_dir: false` for a directory, which is exactly the
+        // lie a modified client could send. The engine re-reads it, so the sink
+        // must be told `true`.
+        assert_eq!(sink.calls(), vec![(path, true, "batch-1".to_string())]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed upload must never delete. The item is quarantined locally
+    /// instead: the user still gets the space back, and nothing is destroyed.
+    #[test]
+    fn a_failed_upload_quarantines_instead_of_deleting() {
+        let (dir, cfg) = scratch("fallback");
+        let target = dir.join("photos");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.jpg"), b"image").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::failing();
+        let cloud = CloudContext {
+            subscriber: true,
+            sink: Some(&sink),
+            batch_id: "batch-1".to_string(),
+        };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::LargeFile, Disposition::CloudBackup)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert!(report.backed_up.is_empty());
+        assert_eq!(report.backup_fallbacks.len(), 1, "the failure was not reported");
+        assert_eq!(report.quarantined.len(), 1, "the item was not quarantined");
+        assert!(!target.exists(), "the item should have moved to quarantine");
+        assert!(
+            cfg.quarantine_dir.exists(),
+            "nothing was actually quarantined"
+        );
+        assert!(
+            report.failed.is_empty(),
+            "a handled fallback must not also be reported as a failure"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The subscription gate is enforced server-side: a client asking for a
+    /// paid feature it has not paid for gets a refusal, not the feature.
+    #[test]
+    fn a_non_subscriber_cannot_use_cloud_backup() {
+        let (dir, cfg) = scratch("gate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("stuff");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("f"), b"x").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext {
+            subscriber: false,
+            sink: Some(&sink),
+            batch_id: "b".to_string(),
+        };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::CloudBackup)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert!(report.backed_up.is_empty());
+        assert_eq!(report.blocked.len(), 1);
+        assert!(report.blocked[0].reason.contains("subscription"), "{:?}", report.blocked[0].reason);
+        assert!(target.exists(), "a refused item was removed anyway");
+        assert!(sink.calls().is_empty(), "the upload was attempted without a subscription");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With nowhere to upload to, the feature refuses rather than silently
+    /// degrading into a delete.
+    #[test]
+    fn cloud_backup_without_a_sink_refuses_rather_than_deleting() {
+        let (dir, cfg) = scratch("nosink");
+        let target = dir.join("stuff");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("f"), b"x").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let cloud = CloudContext { subscriber: true, sink: None, batch_id: "b".into() };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::CloudBackup)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert!(report.blocked.len() == 1);
+        assert!(report.blocked[0].reason.contains("unavailable"), "{:?}", report.blocked[0]);
+        assert!(target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporary_junk_is_not_a_cloud_backup_target() {
+        let (dir, cfg) = scratch("junk");
+        let target = dir.join("junk.tmp");
+        std::fs::write(&target, b"x").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext { subscriber: true, sink: Some(&sink), batch_id: "b".into() };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::TempJunk, Disposition::CloudBackup)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert!(report.backed_up.is_empty());
+        assert_eq!(report.blocked.len(), 1);
+        assert!(target.exists());
+        assert!(sink.calls().is_empty(), "garbage was uploaded to the user's cloud");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Critical mark blocks every action, including this one.
+    #[test]
+    fn a_critical_mark_blocks_a_cloud_backup() {
+        let (dir, cfg) = scratch("crit");
+        let target = dir.join("thesis");
+        std::fs::create_dir_all(&target).unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext { subscriber: true, sink: Some(&sink), batch_id: "b".into() };
+        let marks = marked(&path, crate::importance::Importance::Critical);
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::LargeFile, Disposition::CloudBackup)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &marks,
+            &cloud,
+        );
+
+        assert!(report.backed_up.is_empty());
+        assert_eq!(report.blocked.len(), 1);
+        assert!(target.exists());
+        assert!(sink.calls().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// High means "restorable actions only", and a confirmed upload is
+    /// restorable - so this must be allowed through.
+    #[test]
+    fn a_high_mark_allows_a_cloud_backup() {
+        let (dir, cfg) = scratch("high");
+        let target = dir.join("contracts");
+        std::fs::create_dir_all(&target).unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext { subscriber: true, sink: Some(&sink), batch_id: "b".into() };
+        let marks = marked(&path, crate::importance::Importance::High);
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::LargeFile, Disposition::CloudBackup)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &marks,
+            &cloud,
+        );
+
+        assert_eq!(report.backed_up.len(), 1, "High should permit a restorable action");
+        assert!(report.blocked.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cloud_backup_needs_no_red_confirmation() {
+        // The local copy goes, but a confirmed copy exists in the cloud, so
+        // this is not one of the irreversible actions the checkbox guards.
+        let items = vec![item("C:/x/big.mkv", Category::LargeFile, Disposition::CloudBackup)];
+        assert!(!needs_red_confirmation(&items));
+
+        let (dir, cfg) = scratch("red");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("leftover");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("f"), b"x").unwrap();
+        let path = p.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext { subscriber: true, sink: Some(&sink), batch_id: "b".into() };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::AppLeftover, Disposition::CloudBackup)],
+                // Deliberately not confirmed: a red-tagged item must still be
+                // allowed through the cloud-backup path.
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+        assert_eq!(report.backed_up.len(), 1);
+        assert!(report.blocked.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The elevated helper has no UI to complete a sign-in, so a staged
+    /// request that contains a cloud backup must refuse it rather than fall
+    /// back to deleting.
+    #[test]
+    fn the_default_context_refuses_cloud_backup() {
+        let (dir, cfg) = scratch("default");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("x");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("f"), b"x").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::CloudBackup)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &CloudContext::default(),
+        );
+
+        assert!(report.backed_up.is_empty());
+        assert_eq!(report.blocked.len(), 1);
+        assert!(target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing batch id must still produce one folder for the whole run, or
+    /// a batch would scatter across the cloud.
+    #[test]
+    fn an_unspecified_batch_still_groups_the_run() {
+        let (dir, cfg) = scratch("batch");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let sink = FakeSink::ok();
+        let cloud = CloudContext { subscriber: true, sink: Some(&sink), batch_id: String::new() };
+
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![
+                    item(&a.to_string_lossy(), Category::DevArtifact, Disposition::CloudBackup),
+                    item(&b.to_string_lossy(), Category::DevArtifact, Disposition::CloudBackup),
+                ],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert_eq!(report.backed_up.len(), 2);
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].2, calls[1].2, "the batch was split across folders");
+        assert!(calls[0].2.starts_with("batch-"), "unexpected batch id: {}", calls[0].2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -229,6 +229,19 @@ export function clampDisposition(f, d) {
   return d;
 }
 
+/**
+ * Whether "back this up, then delete it" can be offered for this row.
+ *
+ * Mirrors the backend's rule: the subscription must be active, and the
+ * category must be one where a backup means something - uploading a temp file
+ * would spend the user's cloud quota preserving rubbish, and a OneDrive
+ * placeholder is already in the cloud.
+ */
+export function canCloudBackup(f) {
+  if (!state.entitlement || !state.entitlement.subscriber) return false;
+  return !["temp_junk", "system_cache", "cloud_placeholder"].includes(f.category);
+}
+
 export function effectiveDisposition(f) {
   // Cloud-backed content has exactly one meaningful action. Deleting a
   // placeholder inside a sync root deletes the cloud file, and quarantining it
@@ -237,6 +250,7 @@ export function effectiveDisposition(f) {
   if (f.category === "cloud_placeholder") return "dehydrate";
   const o = state.overrides.get(f.id);
   if (o) return clampDisposition(f, o);
+  if (state.batchDisposition === "backup" && canCloudBackup(f)) return "cloud_backup";
   if (state.batchDisposition === "purge" && f.category !== "temp_junk" && f.category !== "system_cache") return clampDisposition(f, "purge");
   if (state.batchDisposition === "quarantine") return "quarantine";
   if (state.batchDisposition === "split") {
@@ -665,7 +679,9 @@ export const actions = {
       pv.busy = false;
       state.preview = null;
       const released = (report.dehydrated || []).length;
-      const done = report.purged.length + report.quarantined.length + released;
+      const backedUp = (report.backedUp || []).length;
+      const fallbacks = (report.backupFallbacks || []).length;
+      const done = report.purged.length + report.quarantined.length + released + backedUp;
       // Only mention the destructive counts when something was actually
       // destroyed. "Permanently deleted 0 items" in front of a release-only
       // cleanup reads as if a deletion happened and is worth checking.
@@ -683,6 +699,17 @@ export const actions = {
           size: fmtBytes(report.dehydrateRequestedBytes || 0),
         });
       }
+      if (backedUp) {
+        msg += t(state.lang, "toast.backedUp", {
+          n: backedUp,
+          size: fmtBytes(report.backupBytes || 0),
+        });
+      }
+      // A fallback is not a failure: the space was reclaimed. But the user
+      // asked for a cloud copy and did not get one, so it is said out loud.
+      if (fallbacks) {
+        msg += t(state.lang, "toast.backupFallback", { n: fallbacks });
+      }
       if (report.blocked.length) msg += t(state.lang, "toast.blocked", { n: report.blocked.length });
       if (report.failed.length) msg += t(state.lang, "toast.failed", { n: report.failed.length });
       toast(msg, done ? "ok" : "err");
@@ -695,7 +722,7 @@ export const actions = {
       // folder is still there, but the row's byte count is now stale until the
       // next scan, and a row that claims space it no longer holds is worse
       // than no row.
-      const cleaned = new Set([...report.purged, ...report.quarantined, ...(report.dehydrated || [])]);
+      const cleaned = new Set([...report.purged, ...report.quarantined, ...(report.dehydrated || []), ...(report.backedUp || [])]);
       state.findings = state.findings.filter(f => !cleaned.has(f.path));
       state.selected.clear();
       // The drill-down is derived from state.findings; a stale openDir would
@@ -732,6 +759,7 @@ export const actions = {
     for (const g of pv.groups) {
       const label = g.disposition === "purge" ? t(lang, "exp.purge")
         : g.disposition === "dehydrate" ? t(lang, "exp.dehydrate")
+        : g.disposition === "cloud_backup" ? t(lang, "exp.cloudBackup")
         : t(lang, "exp.quarantine");
       lines.push(t(lang, "exp.group", { label, count: g.itemCount, size: fmtBytes(g.onDiskBytes) }));
       const items = pv.items.filter(i => i.disposition === g.disposition);

@@ -24,6 +24,8 @@ pub enum Action {
     /// Released a cloud-backed file's local copy. Nothing was destroyed: the
     /// file stays in OneDrive and re-downloads on access.
     Dehydrate,
+    /// Uploaded an item to the user's OneDrive and then removed the local copy.
+    CloudBackup,
 }
 
 impl Action {
@@ -35,6 +37,7 @@ impl Action {
             Action::PurgeBatch => "彻底清除隔离批次",
             Action::CancelScan => "取消扫描",
             Action::Dehydrate => "释放本地副本",
+            Action::CloudBackup => "备份到云端并释放本地",
         }
     }
 }
@@ -106,6 +109,7 @@ pub fn record_disposition(d: Disposition, path: &str, bytes: u64, ok: bool) {
         Disposition::Purge => Action::Purge,
         Disposition::Quarantine => Action::Quarantine,
         Disposition::Dehydrate => Action::Dehydrate,
+        Disposition::CloudBackup => Action::CloudBackup,
     };
     record(
         action,

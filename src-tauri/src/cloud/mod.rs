@@ -6,5 +6,6 @@
 //! The Graph-backed quota and upload features live elsewhere and are opt-in.
 
 pub mod account;
+pub mod backup;
 pub mod graph;
 pub mod onedrive;

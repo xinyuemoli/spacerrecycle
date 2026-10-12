@@ -3,7 +3,7 @@ import {
   selectedItems, selectionTotals, filteredFindings, categoryTotals,
   dirTotals, findingsInDir,
   categoryLabel, riskLabelOf, RISK_DOT, isExpired, ageDays, PAGE_SIZE,
-  importanceOf, IMPORTANCE_LEVELS, selectable, stopPolling,
+  importanceOf, IMPORTANCE_LEVELS, selectable, stopPolling, canCloudBackup,
 } from "./state.js";
 import { listen } from "./api.js";
 import { t } from "./i18n.js";
@@ -577,9 +577,15 @@ function row(f) {
       ? `<option value="quarantine" ${d === "quarantine" ? "selected" : ""}>${T("disp.quarantine")}</option>`
       : `<option value="purge" ${d === "purge" ? "selected" : ""}>${T("disp.purge")}</option>`;
   } else {
+    // A subscriber gets the extra option that keeps a copy in the cloud before
+    // the local file goes; everyone else is not shown a feature they cannot use.
+    const backupOption = canCloudBackup(f)
+      ? `<option value="cloud_backup" ${d === "cloud_backup" ? "selected" : ""}>${T("disp.cloudBackup")}</option>`
+      : "";
     options = `${noPurge ? "" : `<option value="" ${!overridden ? "selected" : ""}>${T("disp.default")}</option>`}
        ${noPurge ? "" : `<option value="purge" ${d === "purge" ? "selected" : ""}>${T("disp.purge")}</option>`}
-       <option value="quarantine" ${d === "quarantine" ? "selected" : ""}>${T("disp.quarantine")}</option>`;
+       <option value="quarantine" ${d === "quarantine" ? "selected" : ""}>${T("disp.quarantine")}</option>
+       ${backupOption}`;
   }
 
   return h`
@@ -614,6 +620,9 @@ function actionBar() {
         <option value="split" ${state.batchDisposition === "split" ? "selected" : ""}>${T("bar.split")}</option>
         <option value="purge" ${state.batchDisposition === "purge" ? "selected" : ""}>${T("bar.purgeAll")}</option>
         <option value="quarantine" ${state.batchDisposition === "quarantine" ? "selected" : ""}>${T("bar.quarantineAll")}</option>
+        ${state.entitlement && state.entitlement.subscriber
+          ? `<option value="backup" ${state.batchDisposition === "backup" ? "selected" : ""}>${T("bar.backupAll")}</option>`
+          : ""}
       </select>
       <button class="primary" data-act="preview">${T("bar.clean")}</button>
     </div>`;
@@ -628,12 +637,17 @@ function previewModal() {
   // "everything can be restored" would be true but misses the point: nothing
   // is being removed at all, and the files stay visible in Explorer.
   const onlyDehydrate = hasDehydrate && pv.groups.every(g => g.disposition === "dehydrate");
+  // Everything here is uploaded first and only then removed locally. Saying
+  // "everything can be restored" would be true but would hide the part that
+  // matters: the local copy is gone, and getting it back means downloading it.
+  const hasBackup = pv.groups.some(g => g.disposition === "cloud_backup");
+  const onlyBackup = hasBackup && pv.groups.every(g => g.disposition === "cloud_backup");
   return h`
     <div class="overlay" data-act="close-preview">
       <div class="modal">
         <div class="modal-head">
           <h3>${T("prev.title")}</h3>
-          <p>${hasPurge ? T("prev.irreversible") : onlyDehydrate ? T("prev.releaseNote") : T("prev.restorable")}</p>
+          <p>${hasPurge ? T("prev.irreversible") : onlyDehydrate ? T("prev.releaseNote") : onlyBackup ? T("prev.backupNote") : T("prev.restorable")}</p>
         </div>
         <div class="modal-body">
           ${pv.groups.map(g => previewGroup(g, pv.items)).join("")}
@@ -650,7 +664,7 @@ function previewModal() {
           <button data-act="close-preview">${T("prev.cancel")}</button>
           <button class="${hasPurge ? "danger" : "primary"}" data-act="do-cleanup"
             ${pv.busy || (pv.needsRed && !pv.confirmed) ? "disabled" : ""}>
-            ${pv.busy ? T("prev.busy") : hasPurge ? T("prev.purgeBtn") : onlyDehydrate ? T("prev.releaseBtn") : T("prev.quarantineBtn")}
+            ${pv.busy ? T("prev.busy") : hasPurge ? T("prev.purgeBtn") : onlyBackup ? T("prev.backupBtn") : onlyDehydrate ? T("prev.releaseBtn") : T("prev.quarantineBtn")}
           </button>
         </div>
       </div>
@@ -661,6 +675,7 @@ function previewGroup(g, items) {
   const isPurge = g.disposition === "purge";
   const label = g.disposition === "purge" ? T("prev.purge")
     : g.disposition === "dehydrate" ? T("prev.dehydrate")
+    : g.disposition === "cloud_backup" ? T("prev.cloudBackup")
     : T("prev.quarantine");
   const groupItems = items.filter(i => i.disposition === g.disposition);
   const shown = groupItems.slice(0, 8);

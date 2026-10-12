@@ -30,7 +30,14 @@ Plus:
 - **Explicit disposition** — each item is either *purged permanently*, *moved to quarantine*, or (for OneDrive content) *released locally*, never collapsed into a single ambiguous click.
 - **Risk tags** — `temp/cache` (safe), `dev artifact` (rebuildable), `large file` (personal data), `app leftover` (may contain user data), `cloud copy` (a cached download). Red items need an extra confirmation before permanent purge.
 - **Importance marks** — right-click any row to mark it *Critical / Important / Normal / Disposable*. The level is stored by path, survives a re-scan, and is enforced in the cleanup pipeline itself: Critical refuses every action, Important refuses permanent deletion.
+- **Cloud backup** (subscription) — upload an item to your own OneDrive and remove the local copy only after the upload is confirmed. If the upload fails it falls back to a local quarantine, so nothing is ever lost.
 - **Audit log** — every cleanup / release / restore / purge is written to a traceable log.
+
+## Cloud backup: free the disk, keep a copy
+
+For the items you are unsure about, the safest answer is not "delete" or "quarantine" but "keep it somewhere that is not this disk". With an active subscription and a linked OneDrive account, SpaceRecycle uploads the item to its own folder in your OneDrive and removes the local copy **only after the upload has been confirmed**.
+
+The order is the whole point. Every failure path returns before anything is removed, and a failed upload hands the item to the local quarantine instead — the space is still reclaimed, and nothing is destroyed on the way. The app asks for `Files.ReadWrite.AppFolder`, so it can only reach its own folder and cannot see any of your other files.
 
 ## OneDrive: reclaim without deleting
 
@@ -78,6 +85,7 @@ node dist/_test_importance.mjs
 node dist/_test_cloud.mjs
 node dist/_test_subscription.mjs
 node dist/_test_account.mjs
+node dist/_test_cloudbackup.mjs
 
 # These two drive a real headless browser and need `playwright` + Chromium.
 # Without it they print SKIP and exit 0 rather than failing.

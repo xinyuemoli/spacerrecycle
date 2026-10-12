@@ -458,13 +458,35 @@ pub fn needs_red_confirmation(items: Vec<crate::engine::SelectedItem>) -> bool {
 
 #[tauri::command]
 pub async fn run_cleanup(
+    state: State<'_, GraphState>,
     request: crate::engine::CleanupRequest,
-) -> crate::engine::CleanupReport {
-    offload(move || {
+) -> Result<crate::engine::CleanupReport, String> {
+    let access = Arc::clone(&state.access);
+    Ok(offload(move || {
         let cfg = Config::load();
-        crate::engine::run_cleanup(request, &cfg)
+        let marks = crate::importance::Store::load();
+        // Resolved here rather than in the UI: the subscription gate has to
+        // hold against a client that asks for a paid feature regardless.
+        let entitlement = crate::license::entitlement();
+
+        // Built unconditionally but inert until an item asks for an upload, so
+        // a cleanup with no cloud items makes no network call at all.
+        let transport = crate::cloud::graph::WinHttp;
+        let store = crate::cloud::account::DiskAuth;
+        let sink = crate::cloud::backup::OneDriveSink {
+            transport: &transport,
+            store: &store,
+            cache: &access,
+            now: crate::license::now_unix(),
+        };
+        let cloud = crate::engine::CloudContext {
+            subscriber: entitlement.cloud_backup_allowed(),
+            sink: Some(&sink),
+            batch_id: String::new(),
+        };
+        crate::engine::run_cleanup_full(request, &cfg, &marks, &cloud)
     })
-    .await
+    .await)
 }
 
 /// Relaunch the app elevated and replay the given cleanup request.

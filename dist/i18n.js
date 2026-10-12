@@ -88,6 +88,7 @@ const STRINGS = {
     "disp.default": "默认",
     "disp.purge": "永久删除",
     "disp.quarantine": "移到隔离区",
+    "disp.cloudBackup": "备份到云端并删除",
     // importance marks (user-assigned, via the row's right-click menu)
     "imp.critical": "关键",
     "imp.high": "重要",
@@ -115,6 +116,12 @@ const STRINGS = {
     "prev.releaseBtn": "释放本地副本",
     "exp.dehydrate": "释放本地副本",
     "toast.released": "；已请求释放 {n} 个文件夹的本地副本（约 {size}，后台完成）",
+    "prev.cloudBackup": "备份到 OneDrive 后删除本地",
+    "prev.backupNote": "文件会先上传到你的 OneDrive 并核对，确认成功后才删除本地副本。若上传失败会自动改为本地隔离，不会丢数据。",
+    "prev.backupBtn": "备份并清理",
+    "exp.cloudBackup": "备份到 OneDrive 后删除本地",
+    "toast.backedUp": "；已备份 {n} 项到 OneDrive（{size}）并释放本地",
+    "toast.backupFallback": "；{n} 项上传失败，已改为本地隔离",
     // subscription
     "sub.title": "订阅",
     "sub.active": "已订阅",
@@ -162,6 +169,7 @@ const STRINGS = {
     "bar.split": "临时缓存直删，其余隔离",
     "bar.purgeAll": "全部永久删除",
     "bar.quarantineAll": "全部移到隔离区",
+    "bar.backupAll": "全部备份到云端",
     "bar.clean": "清理所选…",
     // preview modal
     "prev.title": "确认清理",
@@ -352,6 +360,7 @@ const STRINGS = {
     "disp.default": "Default",
     "disp.purge": "Permanently delete",
     "disp.quarantine": "Move to quarantine",
+    "disp.cloudBackup": "Back up to cloud, then delete",
     // importance marks (user-assigned, via the row's right-click menu)
     "imp.critical": "Critical",
     "imp.high": "Important",
@@ -379,6 +388,12 @@ const STRINGS = {
     "prev.releaseBtn": "Release local copies",
     "exp.dehydrate": "Release local copies",
     "toast.released": "; requested release of {n} folder(s) (~{size}, completes in the background)",
+    "prev.cloudBackup": "Upload to OneDrive, then delete locally",
+    "prev.backupNote": "Files are uploaded to your OneDrive and checked first; the local copy is removed only once that succeeds. If an upload fails it falls back to a local quarantine, so nothing is lost.",
+    "prev.backupBtn": "Back up and clean",
+    "exp.cloudBackup": "Upload to OneDrive, then delete locally",
+    "toast.backedUp": "; {n} item(s) backed up to OneDrive ({size}) and freed locally",
+    "toast.backupFallback": "; {n} upload(s) failed and were quarantined locally instead",
     // subscription
     "sub.title": "Subscription",
     "sub.active": "Subscribed",
@@ -425,6 +440,7 @@ const STRINGS = {
     "bar.split": "Purge temp/cache, quarantine the rest",
     "bar.purgeAll": "Purge all permanently",
     "bar.quarantineAll": "Move all to quarantine",
+    "bar.backupAll": "Back up all to the cloud",
     "bar.clean": "Clean selected…",
     "prev.title": "Confirm cleanup",
     "prev.irreversible": "The following actions are irreversible. Please review carefully.",

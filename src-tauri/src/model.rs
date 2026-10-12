@@ -123,6 +123,20 @@ impl Category {
         matches!(self, Category::CloudPlaceholder)
     }
 
+    /// Whether "back this up, then delete it" is a meaningful offer.
+    ///
+    /// No for temp junk and caches, which are garbage by definition: uploading
+    /// a temp file to the cloud costs the user quota to preserve something they
+    /// already decided to throw away. No for cloud placeholders either - they
+    /// are already in OneDrive, so "back it up" is a no-op dressed as a
+    /// feature.
+    pub fn allows_cloud_backup(&self) -> bool {
+        !matches!(
+            self,
+            Category::TempJunk | Category::SystemCache | Category::CloudPlaceholder
+        )
+    }
+
     /// Age gating. Dev artifacts are always listed; anything that might be
     /// personal data needs a minimum untouched period.
     pub fn min_age_days(&self, large_file_age_days: u32, leftover_age_days: u32) -> u32 {
@@ -149,6 +163,14 @@ pub enum Disposition {
     /// Windows re-downloads it on first access, so this is fully reversible by
     /// simply opening the file.
     Dehydrate,
+    /// Upload to the user's OneDrive, then remove the local copy.
+    ///
+    /// The only disposition that frees the disk *and* keeps a copy, which is
+    /// why it is the safest way to act on something the user is unsure about -
+    /// and why it is the one behind a subscription. The invariant that matters:
+    /// the local copy is removed only after the upload has been confirmed, so
+    /// a failure here can never lose data.
+    CloudBackup,
 }
 
 /// A single cleanup candidate.
@@ -192,6 +214,8 @@ impl Finding {
             // Releasing a download frees exactly its local footprint; the
             // logical size stays in the cloud and is not reclaimed.
             Disposition::Dehydrate => self.on_disk_size,
+            // The local copy goes away, so the footprint is what comes back.
+            Disposition::CloudBackup => self.on_disk_size,
         }
     }
 }
@@ -320,5 +344,41 @@ mod tests {
         sorted.dedup();
         assert_eq!(keys.len(), sorted.len(), "two categories share a key");
         assert_eq!(Category::CloudPlaceholder.key(), "cloud_placeholder");
+    }
+
+    /// Offering to upload garbage to the user's cloud would spend their quota
+    /// preserving something they already decided to throw away.
+    #[test]
+    fn backing_up_garbage_is_not_offered() {
+        assert!(!Category::TempJunk.allows_cloud_backup());
+        assert!(!Category::SystemCache.allows_cloud_backup());
+        assert!(!Category::CloudPlaceholder.allows_cloud_backup());
+        assert!(Category::DevArtifact.allows_cloud_backup());
+        assert!(Category::LargeFile.allows_cloud_backup());
+        assert!(Category::AppLeftover.allows_cloud_backup());
+    }
+
+    /// A cloud backup removes the local copy, so it must count the same space
+    /// as a purge - a smaller number would understate what the user reclaims.
+    #[test]
+    fn a_cloud_backup_reclaims_the_local_footprint() {
+        let f = Finding {
+            id: "x".into(),
+            rule_id: "t".into(),
+            name: "n".into(),
+            path: "C:\\x".into(),
+            is_dir: false,
+            logical_size: 100,
+            on_disk_size: 60,
+            last_access_unix: 0,
+            created_unix: 0,
+            age_days: 1,
+            age_basis: AgeBasis::Creation,
+            category: Category::LargeFile,
+            risk: RiskTier::Personal,
+            disposition: Disposition::CloudBackup,
+            child_count: 0,
+        };
+        assert_eq!(f.reclaimable(), 60);
     }
 }
