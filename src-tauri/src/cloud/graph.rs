@@ -120,9 +120,15 @@ pub trait Transport: Send + Sync {
     /// Authenticated GET.
     fn get_json(&self, url: &str, bearer: &str) -> Result<(u16, String), String>;
     /// Authenticated POST with a JSON body. Distinct from `put` because the
-    /// upload-session endpoint accepts only POST, and a transport that silently
-    /// swapped verbs would fail in a way that looks like a server problem.
+/// upload-session endpoint accepts only POST, and a transport that silently
+/// swapped verbs would fail in a way that looks like a server problem.
     fn post_json(&self, url: &str, bearer: &str, body: &[u8]) -> Result<(u16, String), String>;
+    /// Download. `bearer` is `None` for a pre-authenticated URL, which is what
+    /// Graph hands back for content: the redirect target carries its own
+    /// credentials in the query string.
+    fn get_bytes(&self, url: &str, bearer: Option<&str>) -> Result<(u16, Vec<u8>), String>;
+    /// Authenticated DELETE.
+    fn delete(&self, url: &str, bearer: &str) -> Result<(u16, String), String>;
     /// Authenticated PUT with a raw body and explicit headers.
     fn put(
         &self,
@@ -204,6 +210,39 @@ impl Transport for WinHttp {
             ("Content-Type", "application/json"),
         ];
         match crate::winapi::http::request("POST", url, &headers, Some(body)) {
+            Ok(r) => Ok((r.status, r.body)),
+            Err(crate::winapi::http::HttpError::Status(code, body)) => Ok((code, body)),
+            Err(e) => Err(e.message()),
+        }
+    }
+
+    fn get_bytes(&self, url: &str, bearer: Option<&str>) -> Result<(u16, Vec<u8>), String> {
+        let auth = bearer.map(|b| format!("Bearer {b}"));
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        if let Some(a) = auth.as_deref() {
+            headers.push(("Authorization", a));
+        }
+        let req = crate::winapi::http::Request {
+            method: "GET",
+            url,
+            headers: &headers,
+            body: None,
+            // Content requests always redirect to a pre-authenticated host.
+            follow_redirects: true,
+        };
+        match crate::winapi::http::send(&req) {
+            Ok(r) => Ok((r.status, r.body)),
+            Err(crate::winapi::http::HttpError::Status(code, body)) => {
+                Ok((code, body.into_bytes()))
+            }
+            Err(e) => Err(e.message()),
+        }
+    }
+
+    fn delete(&self, url: &str, bearer: &str) -> Result<(u16, String), String> {
+        let auth = format!("Bearer {bearer}");
+        let headers = [("Authorization", auth.as_str())];
+        match crate::winapi::http::request("DELETE", url, &headers, None) {
             Ok(r) => Ok((r.status, r.body)),
             Err(crate::winapi::http::HttpError::Status(code, body)) => Ok((code, body)),
             Err(e) => Err(e.message()),
@@ -512,6 +551,100 @@ pub fn put_chunk(
     t.put(upload_url, &headers, chunk)
 }
 
+// ------------------------------------------------------- app folder items
+
+/// Percent-encode a path for Graph's `:/path:` addressing form, keeping the
+/// separators so the folder structure is preserved.
+pub fn encode_path(path: &str) -> String {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .map(percent_encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Address one item inside the app's folder.
+pub fn item_url(path: &str) -> String {
+    format!("{GRAPH}/me/drive/special/approot:/{}", encode_path(path))
+}
+
+/// Address one item's children.
+pub fn children_url(path: &str) -> String {
+    format!("{GRAPH}/me/drive/special/approot:/{}:/children", encode_path(path))
+}
+
+/// Address one item's content.
+pub fn content_url(path: &str) -> String {
+    format!("{GRAPH}/me/drive/special/approot:/{}:/content", encode_path(path))
+}
+
+/// A minimal drive item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveItem {
+    pub id: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+/// List a folder's direct children.
+pub fn list_children(t: &dyn Transport, bearer: &str, path: &str) -> Result<Vec<DriveItem>, String> {
+    let url = format!("{}?$select=id,name,size,folder,file&$top=200", children_url(path));
+    let (status, body) = t.get_json(&url, bearer)?;
+    if status == 404 {
+        // The folder does not exist yet, which is the normal state before the
+        // first backup rather than an error.
+        return Ok(Vec::new());
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("listing {path} failed (HTTP {status}): {}", graph_error(&body)));
+    }
+    parse_children(&body)
+}
+
+pub fn parse_children(body: &str) -> Result<Vec<DriveItem>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("malformed children response: {e}"))?;
+    let arr = v
+        .get("value")
+        .and_then(|x| x.as_array())
+        .ok_or("children response has no `value` array")?;
+    let mut out = Vec::new();
+    for item in arr {
+        let Some(name) = item.get("name").and_then(|x| x.as_str()) else { continue };
+        out.push(DriveItem {
+            id: item.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            name: name.to_string(),
+            is_dir: item.get("folder").is_some(),
+            size: item.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Download a file by path.
+///
+/// Graph answers with a redirect to a pre-authenticated host; the transport
+/// follows it and deliberately does not forward our bearer token across hosts.
+pub fn download(t: &dyn Transport, bearer: &str, path: &str) -> Result<Vec<u8>, String> {
+    let (status, body) = t.get_bytes(&content_url(path), Some(bearer))?;
+    if !(200..300).contains(&status) {
+        let detail = String::from_utf8_lossy(&body).chars().take(200).collect::<String>();
+        return Err(format!("download of {path} failed (HTTP {status}): {detail}"));
+    }
+    Ok(body)
+}
+
+/// Delete a file or folder by path.
+pub fn delete_path(t: &dyn Transport, bearer: &str, path: &str) -> Result<(), String> {
+    let (status, body) = t.delete(&item_url(path), bearer)?;
+    if !(200..300).contains(&status) {
+        return Err(format!("deleting {path} failed (HTTP {status}): {}", graph_error(&body)));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +663,7 @@ mod tests {
         /// JSON POSTs, recorded separately from PUTs so a test can prove which
         /// verb was used rather than only that some body was sent.
         json_posts: Mutex<Vec<(String, Vec<u8>)>>,
+        deletes: Mutex<Vec<String>>,
         replies: Mutex<Vec<(u16, String)>>,
     }
 
@@ -578,6 +712,17 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((url.to_string(), body.to_vec()));
+            Ok(self.next())
+        }
+
+        fn get_bytes(&self, url: &str, _bearer: Option<&str>) -> Result<(u16, Vec<u8>), String> {
+            self.gets.lock().unwrap().push(url.to_string());
+            let (status, body) = self.next();
+            Ok((status, body.into_bytes()))
+        }
+
+        fn delete(&self, url: &str, _bearer: &str) -> Result<(u16, String), String> {
+            self.deletes.lock().unwrap().push(url.to_string());
             Ok(self.next())
         }
     }
@@ -848,6 +993,94 @@ mod tests {
         assert_eq!(range.1, "bytes 0-1023/5000");
         let len = headers.iter().find(|(k, _)| k == "Content-Length").unwrap();
         assert_eq!(len.1, "1024");
+    }
+
+    // -------------------------------------------------- app folder items
+
+    #[test]
+    fn app_folder_paths_keep_their_structure_and_encode_each_segment() {
+        let url = item_url("SpaceRecycle Backup/batch-1/my report.pdf");
+        assert!(url.contains("approot:/SpaceRecycle%20Backup/batch-1/my%20report.pdf"), "{url}");
+        // The separators must survive, or the path becomes one long file name.
+        assert!(url.contains("/batch-1/"), "{url}");
+    }
+
+    #[test]
+    fn empty_path_segments_are_dropped_rather_than_producing_a_double_slash() {
+        assert_eq!(encode_path("/a//b/"), "a/b");
+        assert_eq!(encode_path("a"), "a");
+    }
+
+    #[test]
+    fn children_are_parsed_and_folders_distinguished_from_files() {
+        let body = r#"{"value":[
+            {"id":"1","name":"batch-b","size":0,"folder":{"childCount":2}},
+            {"id":"2","name":"manifest.json","size":42,"file":{"mimeType":"application/json"}}
+        ]}"#;
+        let items = parse_children(body).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "batch-b");
+        assert!(items[0].is_dir);
+        assert_eq!(items[1].name, "manifest.json");
+        assert!(!items[1].is_dir);
+        assert_eq!(items[1].size, 42);
+    }
+
+    /// Before the first backup the folder simply does not exist. That is a
+    /// normal empty state, not a failure to report.
+    #[test]
+    fn a_missing_folder_lists_as_empty() {
+        let fake = Fake::with(vec![(404, r#"{"error":{"code":"itemNotFound"}}"#.into())]);
+        assert!(list_children(&fake, "b", "SpaceRecycle Backup").unwrap().is_empty());
+    }
+
+    #[test]
+    fn children_are_sorted_so_the_ui_is_stable() {
+        let body = r#"{"value":[
+            {"id":"1","name":"c","folder":{}},
+            {"id":"2","name":"a","folder":{}},
+            {"id":"3","name":"b","folder":{}}
+        ]}"#;
+        let names: Vec<String> = parse_children(body).unwrap().into_iter().map(|i| i.name).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_children_response_without_a_value_array_is_an_error() {
+        assert!(parse_children(r#"{"id":"x"}"#).is_err());
+        assert!(parse_children("not json").is_err());
+    }
+
+    #[test]
+    fn a_download_returns_the_bytes_and_reports_failure_clearly() {
+        let fake = Fake::with(vec![(200, "file contents".into())]);
+        let bytes = download(&fake, "tok", "SpaceRecycle Backup/b/manifest.json").unwrap();
+        assert_eq!(bytes, b"file contents");
+        let gets = fake.gets.lock().unwrap();
+        assert!(gets[0].contains(":/content"), "{}", gets[0]);
+    }
+
+    #[test]
+    fn a_failed_download_is_an_error_not_an_empty_file() {
+        let fake = Fake::with(vec![(404, r#"{"error":{"message":"not found"}}"#.into())]);
+        let err = download(&fake, "tok", "SpaceRecycle Backup/missing").unwrap_err();
+        assert!(err.contains("404"), "{err}");
+    }
+
+    #[test]
+    fn deleting_uses_the_delete_verb() {
+        let fake = Fake::with(vec![(204, String::new())]);
+        delete_path(&fake, "tok", "SpaceRecycle Backup/batch-1").unwrap();
+        let deletes = fake.deletes.lock().unwrap();
+        assert_eq!(deletes.len(), 1);
+        assert!(deletes[0].contains("SpaceRecycle%20Backup/batch-1"), "{}", deletes[0]);
+    }
+
+    #[test]
+    fn a_failed_delete_is_reported() {
+        let fake = Fake::with(vec![(403, r#"{"error":{"message":"forbidden"}}"#.into())]);
+        let err = delete_path(&fake, "tok", "x").unwrap_err();
+        assert!(err.contains("403"), "{err}");
     }
 
     // -------------------------------------------------- encoding

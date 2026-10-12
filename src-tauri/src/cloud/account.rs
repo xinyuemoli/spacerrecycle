@@ -273,6 +273,14 @@ mod tests {
         fn put(&self, _u: &str, _h: &[(&str, &str)], _b: &[u8]) -> Result<(u16, String), String> {
             Ok(self.next())
         }
+        fn get_bytes(&self, url: &str, _b: Option<&str>) -> Result<(u16, Vec<u8>), String> {
+            self.gets.lock().unwrap().push(url.to_string());
+            let (s, body) = self.next();
+            Ok((s, body.into_bytes()))
+        }
+        fn delete(&self, _u: &str, _b: &str) -> Result<(u16, String), String> {
+            Ok(self.next())
+        }
     }
 
     fn cache() -> AccessCache {

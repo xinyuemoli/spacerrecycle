@@ -39,6 +39,8 @@ For the items you are unsure about, the safest answer is not "delete" or "quaran
 
 The order is the whole point. Every failure path returns before anything is removed, and a failed upload hands the item to the local quarantine instead — the space is still reclaimed, and nothing is destroyed on the way. The app asks for `Files.ReadWrite.AppFolder`, so it can only reach its own folder and cannot see any of your other files.
 
+Each batch carries a manifest recording where every item came from, written to the cloud *after* the uploads finish. That is what makes a batch restorable from another machine or after a reinstall: the Quarantine tab lists the cloud batches and can download them back to their original locations, skipping or overwriting whatever is already there.
+
 ## OneDrive: reclaim without deleting
 
 OneDrive's Files On-Demand keeps a placeholder on disk for every file. SpaceRecycle reads those placeholders and reports, per top-level folder, how much this machine is holding that the cloud already has.
@@ -86,6 +88,7 @@ node dist/_test_cloud.mjs
 node dist/_test_subscription.mjs
 node dist/_test_account.mjs
 node dist/_test_cloudbackup.mjs
+node dist/_test_cloudrestore.mjs
 
 # These two drive a real headless browser and need `playwright` + Chromium.
 # Without it they print SKIP and exit 0 rather than failing.

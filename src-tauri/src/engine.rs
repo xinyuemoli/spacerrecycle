@@ -48,6 +48,9 @@ pub struct CleanupReport {
     /// Not a failure - the space was still reclaimed, nothing was destroyed -
     /// but the user asked for a cloud copy and did not get one.
     pub backup_fallbacks: Vec<String>,
+    /// Set when the batch's files uploaded but its manifest did not. The files
+    /// are safe in OneDrive; only in-app restore is affected.
+    pub backup_manifest_failed: Option<String>,
     /// True when at least one item failed specifically because the process
     /// lacked permission. The UI uses this to offer elevation instead of
     /// silently reporting a partial cleanup.
@@ -393,6 +396,9 @@ pub fn run_cleanup_full(
     let mut backup_fallback: Vec<&SelectedItem> = Vec::new();
     if !to_backup.is_empty() {
         let batch = cloud.batch();
+        // Resolved once so the manifest can be written after the loop.
+        let sink_opt = cloud.sink;
+        let mut manifest_items: Vec<crate::cloud::backup::ManifestEntry> = Vec::new();
         for item in &to_backup {
             let path = Path::new(&item.finding.path);
 
@@ -427,7 +433,7 @@ pub fn run_cleanup_full(
                 });
                 continue;
             }
-            let Some(sink) = cloud.sink else {
+            let Some(sink) = sink_opt else {
                 crate::log::record(
                     crate::log::Action::CloudBackup,
                     &item.finding.path,
@@ -470,18 +476,32 @@ pub fn run_cleanup_full(
             }
 
             match sink.upload(path, is_dir_now(path, item.finding.is_dir), &batch) {
-                Ok(bytes) => {
+                Ok(outcome) => {
                     // The upload is confirmed. Only now may the local copy go.
                     match crate::quarantine::ops::purge(path, is_dir_now(path, item.finding.is_dir)) {
                         Ok(()) => {
                             crate::log::record_disposition(
                                 Disposition::CloudBackup,
                                 &item.finding.path,
-                                bytes,
+                                outcome.bytes,
                                 true,
                             );
                             report.backed_up.push(item.finding.path.clone());
-                            report.backup_bytes += bytes;
+                            report.backup_bytes += outcome.bytes;
+                            // Recorded so the batch can be restored from
+                            // anywhere, not just from this machine's memory of
+                            // what it uploaded.
+                            manifest_items.push(crate::cloud::backup::ManifestEntry {
+                                original_path: item.finding.path.clone(),
+                                name: path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                is_dir: is_dir_now(path, item.finding.is_dir),
+                                bytes: outcome.bytes,
+                                files: outcome.files,
+                                uploaded_unix: crate::license::now_unix(),
+                            });
                         }
                         Err(e) => {
                             // The data is safe in the cloud, so this is not a
@@ -516,6 +536,26 @@ pub fn run_cleanup_full(
                     report.backup_fallbacks.push(item.finding.path.clone());
                     backup_fallback.push(item);
                     let _ = e;
+                }
+            }
+        }
+
+        // The manifest goes last, once every upload has finished. A batch with
+        // files but no manifest is visibly incomplete, which is the honest
+        // state for an interrupted run.
+        if let Some(sink) = sink_opt {
+            if !manifest_items.is_empty() {
+                if let Err(e) = sink.finish_batch(&batch, &manifest_items) {
+                    // Nothing is lost - the files are uploaded - but the batch
+                    // cannot be restored from inside the app, and saying
+                    // nothing would leave the user to find that out later.
+                    crate::log::record(
+                        crate::log::Action::CloudBackup,
+                        &batch,
+                        0,
+                        "备份清单写入失败，该批次需在 OneDrive 中手动取回",
+                    );
+                    report.backup_manifest_failed = Some(e);
                 }
             }
         }
@@ -1080,6 +1120,8 @@ mod tests {
         /// Whether the source still existed at the moment of upload. This is
         /// the evidence for the module's central invariant.
         existed_at_upload: std::sync::Mutex<Vec<bool>>,
+        /// How many items each batch manifest was asked to record.
+        manifests: std::sync::Mutex<Vec<usize>>,
         fail: bool,
         bytes: u64,
     }
@@ -1097,7 +1139,12 @@ mod tests {
     }
 
     impl crate::cloud::backup::BackupSink for FakeSink {
-        fn upload(&self, path: &Path, is_dir: bool, batch: &str) -> Result<u64, String> {
+        fn upload(
+            &self,
+            path: &Path,
+            is_dir: bool,
+            batch: &str,
+        ) -> Result<crate::cloud::backup::UploadOutcome, String> {
             // Recorded *before* anything else: if the engine ever deleted the
             // file first, this is what catches it.
             self.existed_at_upload
@@ -1111,8 +1158,22 @@ mod tests {
             if self.fail {
                 Err("simulated upload failure".to_string())
             } else {
-                Ok(self.bytes)
+                Ok(crate::cloud::backup::UploadOutcome {
+                    bytes: self.bytes,
+                    files: vec![crate::cloud::backup::ManifestFile {
+                        relative: "f".to_string(),
+                        size: self.bytes,
+                    }],
+                })
             }
+        }
+        fn finish_batch(
+            &self,
+            _batch: &str,
+            _items: &[crate::cloud::backup::ManifestEntry],
+        ) -> Result<(), String> {
+            self.manifests.lock().unwrap().push(_items.len());
+            Ok(())
         }
         fn describe(&self) -> String {
             "fake".to_string()

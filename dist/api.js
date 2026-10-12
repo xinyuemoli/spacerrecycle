@@ -36,6 +36,7 @@ function stub(cmd) {
     case "refresh_entitlement": return { subscriber: false, source: "not_configured", checkedUnix: 0, expiresUnix: null, detail: "" };
     case "graph_account_status": return { connected: false, quota: null, detail: "" };
     case "graph_connect_start": return { userCode: "SKIP-INERT", verificationUri: "", intervalSecs: 5, expiresIn: 0 };
+    case "list_cloud_backups": return [];
     case "build_preview": return [];
     case "needs_red_confirmation": return false;
     default: return null;

@@ -712,6 +712,54 @@ function quarantineView() {
     ${state.batches.length ? state.batches.map(batchBlock).join("")
       : `<div class="empty"><div class="big">◌</div><p>${T("q.empty")}</p>
          <p style="margin-top:6px">${T("q.emptyHint")}</p></div>`}
+
+    ${cloudBackupsSection()}
+  `;
+}
+
+/**
+ * Backups that live in the user's OneDrive.
+ *
+ * Shown in the quarantine tab because that is where "things I cleaned that are
+ * still recoverable" already lives. The destination is the user's own drive,
+ * so the files are reachable without this app; what this section adds is
+ * knowing which batch corresponds to what, and a one-click way back.
+ */
+function cloudBackupsSection() {
+  const list = state.cloudBackups;
+  if (!list || !list.length) return "";
+  const busy = state.cloudBusy;
+  return h`
+    <h2 class="section mt">${T("cb.title")}</h2>
+    <p class="hint" style="margin-bottom:10px">${T("cb.hint")}</p>
+    ${list.map(b => h`
+      <div class="batch">
+        <div class="batch-head static">
+          <span class="id">${esc(b.batchId)}</span>
+          ${b.manifest
+            ? `<span class="dim">${T("col.items", { n: b.manifest.items.length })}</span>
+               <span class="dim">${T("cb.files", { n: b.manifest.totalFiles })}</span>
+               <div class="spacer"></div>
+               <span style="color:var(--accent);font-weight:600">${fmtBytes(b.manifest.totalBytes)}</span>`
+            : `<span class="tag personal">${T("cb.unreadable")}</span>`}
+        </div>
+        <div class="batch-body">
+          ${b.manifest ? `<table>
+            <thead><tr><th>${T("cb.colOriginal")}</th><th style="width:90px" class="right">${T("col.size")}</th></tr></thead>
+            <tbody>${b.manifest.items.map(i => h`<tr>
+              <td class="path" title="${esc(i.originalPath)}">${esc(i.originalPath)}</td>
+              <td class="num">${fmtBytes(i.bytes)}</td>
+            </tr>`).join("")}</tbody>
+          </table>` : `<div class="faint" style="font-size:11px;padding:4px 0">${esc(b.error || "")}</div>`}
+          <div class="toolbar mt" style="margin-bottom:0">
+            ${b.manifest ? h`
+              <button class="sm" data-act="cb-restore" data-batch="${esc(b.batchId)}" data-policy="skip" ${busy ? "disabled" : ""}>${T("cb.restoreSkip")}</button>
+              <button class="sm" data-act="cb-restore" data-batch="${esc(b.batchId)}" data-policy="overwrite" ${busy ? "disabled" : ""}>${T("cb.restoreOverwrite")}</button>` : ""}
+            <div class="spacer"></div>
+            <button class="sm danger" data-act="cb-delete" data-batch="${esc(b.batchId)}" ${busy ? "disabled" : ""}>${T("cb.delete")}</button>
+          </div>
+        </div>
+      </div>`).join("")}
   `;
 }
 
@@ -1005,6 +1053,12 @@ function bind() {
     }
     else if (act === "purge-expired") {
       if (confirm(T("q.purgeExpiredConfirm"))) actions.purgeExpired();
+    }
+    else if (act === "cb-restore") {
+      actions.restoreCloudBatch(t.dataset.batch, t.dataset.policy);
+    }
+    else if (act === "cb-delete") {
+      if (confirm(T("cb.deleteConfirm"))) actions.deleteCloudBatch(t.dataset.batch);
     }
     else if (act === "save-settings") actions.saveSettings(collectSettings());
     else if (act === "set-imp") {

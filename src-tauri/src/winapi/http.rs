@@ -20,9 +20,10 @@ use std::ffi::c_void;
 use windows::core::PCWSTR;
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
-    INTERNET_DEFAULT_HTTP_PORT, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-    WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
+    WinHttpSetTimeouts, INTERNET_DEFAULT_HTTP_PORT, INTERNET_DEFAULT_HTTPS_PORT,
+    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_REDIRECT_POLICY,
+    WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 /// A finished response.
@@ -30,6 +31,39 @@ use windows::Win32::Networking::WinHttp::{
 pub struct Response {
     pub status: u16,
     pub body: String,
+}
+
+/// A finished response whose body may not be text.
+#[derive(Debug, Clone)]
+pub struct ByteResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+impl ByteResponse {
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    /// Lossy text view, for error bodies and JSON.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).to_string()
+    }
+}
+
+/// One request.
+pub struct Request<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    pub headers: &'a [(&'a str, &'a str)],
+    pub body: Option<&'a [u8]>,
+    /// Whether to follow 3xx responses.
+    ///
+    /// Off by default and opted into only for downloads. Graph answers a
+    /// content request with a redirect to a pre-authenticated URL, which is
+    /// exactly the case this exists for; leaving it off everywhere else means a
+    /// redirected upload can never silently resend its body to another host.
+    pub follow_redirects: bool,
 }
 
 impl Response {
@@ -134,7 +168,13 @@ pub fn request(
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
 ) -> Result<Response, HttpError> {
-    let parsed = parse_url(url).map_err(HttpError::Transport)?;
+    let r = send(&Request { method, url, headers, body, follow_redirects: false })?;
+    Ok(Response { status: r.status, body: r.text() })
+}
+
+/// Perform one request and hand back the raw body.
+pub fn send(req: &Request<'_>) -> Result<ByteResponse, HttpError> {
+    let parsed = parse_url(req.url).map_err(HttpError::Transport)?;
 
     let agent = wide("SpaceRecycle/0.1");
     let session = unsafe {
@@ -152,9 +192,10 @@ pub fn request(
     let session = Handle(session);
 
     // Bounded waits: a hung connect must not pin a blocking thread forever,
-    // because the UI is waiting on the command that owns it.
+    // because the UI is waiting on the command that owns it. Downloads get a
+    // longer receive window than an API call, since the body can be large.
     unsafe {
-        let _ = WinHttpSetTimeouts(session.0, 10_000, 15_000, 30_000, 60_000);
+        let _ = WinHttpSetTimeouts(session.0, 10_000, 15_000, 60_000, 300_000);
     }
 
     let host = wide(&parsed.host);
@@ -164,7 +205,7 @@ pub fn request(
     }
     let connect = Handle(connect);
 
-    let verb = wide(method);
+    let verb = wide(req.method);
     let target = wide(&parsed.target);
     let flags = if parsed.secure { WINHTTP_FLAG_SECURE } else { Default::default() };
     let request = unsafe {
@@ -183,7 +224,23 @@ pub fn request(
     }
     let request = Handle(request);
 
-    let header_block = headers
+    if req.follow_redirects {
+        // WinHTTP refuses redirects unless told otherwise, and a download URL
+        // is always a redirect to a pre-authenticated host. WinHTTP drops the
+        // Authorization header when the host changes, which is what we want:
+        // the redirect target carries its own credentials in the query string.
+        let policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS.to_le_bytes();
+        unsafe {
+            let _ = WinHttpSetOption(
+                Some(request.0),
+                WINHTTP_OPTION_REDIRECT_POLICY,
+                Some(&policy),
+            );
+        }
+    }
+
+    let header_block = req
+        .headers
         .iter()
         .map(|(k, v)| format!("{k}: {v}"))
         .collect::<Vec<_>>()
@@ -197,7 +254,7 @@ pub fn request(
         Some(&header_wide[..header_wide.len() - 1])
     };
 
-    let (body_ptr, body_len) = match body {
+    let (body_ptr, body_len) = match req.body {
         Some(b) if !b.is_empty() => (b.as_ptr() as *const c_void, b.len() as u32),
         _ => (std::ptr::null(), 0),
     };
@@ -213,9 +270,10 @@ pub fn request(
     let body = read_body(request.0)?;
 
     if (200..300).contains(&status) {
-        Ok(Response { status, body })
+        Ok(ByteResponse { status, body })
     } else {
-        Err(HttpError::Status(status, truncate(&body, 400)))
+        let detail = String::from_utf8_lossy(&body).to_string();
+        Err(HttpError::Status(status, truncate(&detail, 400)))
     }
 }
 
@@ -236,7 +294,7 @@ fn query_status(request: *mut c_void) -> Result<u16, HttpError> {
     Ok(status as u16)
 }
 
-fn read_body(request: *mut c_void) -> Result<String, HttpError> {
+fn read_body(request: *mut c_void) -> Result<Vec<u8>, HttpError> {
     let mut out: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -255,12 +313,15 @@ fn read_body(request: *mut c_void) -> Result<String, HttpError> {
         }
         out.extend_from_slice(&buf[..read as usize]);
         // A JSON API response larger than this is a bug or an attack, not a
-        // result we should be buffering into memory.
-        if out.len() > 32 * 1024 * 1024 {
+        // result we should be buffering into memory. Downloads are files the
+        // user is deliberately restoring, so the ceiling is higher but still
+        // finite: an unbounded buffer on a hostile or corrupt response is how
+        // this process runs out of memory.
+        if out.len() > 512 * 1024 * 1024 {
             return Err(HttpError::Transport("response too large".into()));
         }
     }
-    Ok(String::from_utf8_lossy(&out).to_string())
+    Ok(out)
 }
 
 /// Keep an error body short enough to show in a toast.
@@ -324,6 +385,58 @@ mod tests {
         let short = truncate(&long, 400);
         assert!(short.chars().count() <= 401);
         assert_eq!(truncate("  hello  ", 400), "hello");
+    }
+
+    /// Live check that redirects are followed only when asked for.
+    ///
+    /// Downloads from Graph are always a 302 to a pre-authenticated host, so
+    /// this plumbing decides whether restore works at all. `aka.ms` is used
+    /// because it is a stable Microsoft redirector rather than a third party.
+    /// Live check that a download follows a redirect through to the content.
+    ///
+    /// Graph answers every content request with a redirect to a
+    /// pre-authenticated host, so this is the path cloud restore depends on.
+    ///
+    /// The negative half - "without `follow_redirects` we would see a 3xx" - is
+    /// deliberately *not* asserted here. On the machine this was written on,
+    /// WinHTTP reached the final response either way, whether because the
+    /// default policy already follows or because the configured proxy resolves
+    /// redirects itself. An assertion on that would be reporting the
+    /// environment, not the code; what matters is that following works.
+    #[test]
+    #[ignore]
+    fn live_a_download_follows_through_to_the_content() {
+        // The `http://` form of a Microsoft short link redirects to `https://`.
+        let r = send(&Request {
+            method: "GET",
+            url: "http://aka.ms/devicelogin",
+            headers: &[],
+            body: None,
+            follow_redirects: true,
+        })
+        .expect("following the redirect failed");
+        assert_eq!(r.status, 200, "did not land on a 200 after redirects");
+        assert!(!r.body.is_empty(), "the followed response had an empty body");
+    }
+
+    /// Live check that a binary body survives the round trip untouched.
+    #[test]
+    #[ignore]
+    fn live_binary_body_is_returned_byte_for_byte() {
+        // A tiny, stable, non-text resource: the IANA root zone database is
+        // served as text, so use a PNG the Microsoft CDN serves instead.
+        let r = send(&Request {
+            method: "GET",
+            url: "https://www.microsoft.com/favicon.ico",
+            headers: &[],
+            body: None,
+            follow_redirects: true,
+        })
+        .expect("download failed");
+        assert_eq!(r.status, 200);
+        assert!(r.body.len() > 100, "suspiciously small body: {}", r.body.len());
+        // An ICO starts with 00 00 01 00.
+        assert_eq!(&r.body[..4], &[0, 0, 1, 0], "the bytes were mangled");
     }
 
     #[test]

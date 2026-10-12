@@ -48,6 +48,15 @@ const state = {
   onedriveAccount: null,
   /** A sign-in in progress: { userCode, verificationUri, intervalSecs, status, detail }. */
   connect: null,
+  /**
+   * Cloud backup batches, newest first.
+   *
+   * `null` until asked. An empty array is the normal state for a machine with
+   * no linked account, so it is not treated as an error.
+   */
+  cloudBackups: null,
+  /** Batch currently being restored or deleted, so its buttons can disable. */
+  cloudBusy: null,
 };
 
 export { state };
@@ -374,7 +383,7 @@ export const actions = {
   setTab(tab) {
     state.tab = tab;
     render();
-    if (tab === "quarantine") actions.refreshQuarantine();
+    if (tab === "quarantine") { actions.refreshQuarantine(); actions.loadCloudBackups(); }
     if (tab === "settings") actions.openSettings();
   },
 
@@ -996,6 +1005,56 @@ export const actions = {
       // Clipboard access can be denied; the URL is on screen either way.
       toast(t(state.lang, "acc.copyFail"), "err");
     }
+  },
+
+  // ---------- cloud backup batches ----------
+
+  /**
+   * Load the batches stored in the cloud.
+   *
+   * A failure here means "no cloud backups to show", not an error worth a
+   * toast on every visit to the tab: the overwhelmingly common reason is that
+   * no OneDrive account is linked.
+   */
+  async loadCloudBackups() {
+    try {
+      state.cloudBackups = await invoke("list_cloud_backups");
+    } catch (_) {
+      state.cloudBackups = [];
+    }
+  },
+
+  async restoreCloudBatch(batchId, policy) {
+    state.cloudBusy = batchId;
+    render();
+    try {
+      const r = await invoke("restore_cloud_backup", { batchId, policy });
+      let msg = t(state.lang, "cb.restored", {
+        n: r.restoredFiles,
+        size: fmtBytes(r.restoredBytes),
+      });
+      if (r.skipped.length) msg += t(state.lang, "cb.skipped", { n: r.skipped.length });
+      if (r.failed.length) msg += t(state.lang, "cb.failed", { n: r.failed.length });
+      toast(msg, r.failed.length ? "err" : "ok");
+    } catch (e) {
+      toast(t(state.lang, "cb.restoreFail", { e }), "err");
+    }
+    state.cloudBusy = null;
+    render();
+  },
+
+  async deleteCloudBatch(batchId) {
+    state.cloudBusy = batchId;
+    render();
+    try {
+      await invoke("delete_cloud_backup", { batchId });
+      toast(t(state.lang, "cb.deleted"), "ok");
+      await actions.loadCloudBackups();
+    } catch (e) {
+      toast(t(state.lang, "cb.deleteFail", { e }), "err");
+    }
+    state.cloudBusy = null;
+    render();
   },
 
   /**

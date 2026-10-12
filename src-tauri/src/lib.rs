@@ -96,6 +96,9 @@ pub fn run() {
             commands::graph_connect_cancel,
             commands::graph_account_status,
             commands::graph_sign_out,
+            commands::list_cloud_backups,
+            commands::restore_cloud_backup,
+            commands::delete_cloud_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SpaceRecycle");

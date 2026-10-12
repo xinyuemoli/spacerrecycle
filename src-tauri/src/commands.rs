@@ -649,6 +649,66 @@ pub fn audit_log_path() -> Option<String> {
     crate::log::log_path().map(|p| p.to_string_lossy().to_string())
 }
 
+/// Every cloud backup batch, newest first.
+///
+/// Errors when no account is linked; the UI treats that as "no cloud backups"
+/// rather than as a failure, because having no OneDrive is the normal case.
+#[tauri::command]
+pub async fn list_cloud_backups(
+    state: State<'_, GraphState>,
+) -> Result<Vec<crate::cloud::backup::CloudBatch>, String> {
+    let access = Arc::clone(&state.access);
+    offload(move || {
+        crate::cloud::backup::list_backups(
+            &crate::cloud::graph::WinHttp,
+            &crate::cloud::account::DiskAuth,
+            &access,
+            crate::license::now_unix(),
+        )
+    })
+    .await
+}
+
+/// Download a batch back to the locations its manifest recorded.
+#[tauri::command]
+pub async fn restore_cloud_backup(
+    state: State<'_, GraphState>,
+    batch_id: String,
+    policy: crate::quarantine::ConflictPolicy,
+) -> Result<crate::cloud::backup::CloudRestoreReport, String> {
+    let access = Arc::clone(&state.access);
+    offload(move || {
+        crate::cloud::backup::restore_batch(
+            &crate::cloud::graph::WinHttp,
+            &crate::cloud::account::DiskAuth,
+            &access,
+            crate::license::now_unix(),
+            &batch_id,
+            policy,
+        )
+    })
+    .await
+}
+
+/// Delete a whole batch from the cloud.
+#[tauri::command]
+pub async fn delete_cloud_backup(
+    state: State<'_, GraphState>,
+    batch_id: String,
+) -> Result<(), String> {
+    let access = Arc::clone(&state.access);
+    offload(move || {
+        crate::cloud::backup::delete_batch(
+            &crate::cloud::graph::WinHttp,
+            &crate::cloud::account::DiskAuth,
+            &access,
+            crate::license::now_unix(),
+            &batch_id,
+        )
+    })
+    .await
+}
+
 /// Whether OneDrive is present, and where its sync roots are.
 ///
 /// Cheap by design: it reads environment variables and stats the result, so
