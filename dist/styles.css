@@ -391,3 +391,86 @@ tr.selected td.path { color: var(--text); }
   display: flex; align-items: center; justify-content: space-between;
   gap: 12px; margin-bottom: 6px;
 }
+
+/* ---------- Importance marks ----------
+   User-assigned levels, set from the row's right-click menu. The colour ramp
+   runs red -> orange -> grey -> green: the safer the level, the more the badge
+   recedes into the background, so a screen full of unmarked rows stays quiet
+   and a marked one is impossible to miss. */
+.imp-badge {
+  display: inline-block;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  margin-right: 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  vertical-align: 1px;
+  font-weight: 600;
+}
+.imp-badge.critical { background: rgba(248,81,73,.16); border-color: var(--red); color: #ff9d97; }
+.imp-badge.high     { background: rgba(210,153,34,.16); border-color: var(--yellow); color: #e3b341; }
+.imp-badge.normal   { background: rgba(139,148,158,.14); border-color: var(--text-faint); color: var(--text-dim); }
+.imp-badge.low      { background: rgba(63,185,80,.14); border-color: var(--green); color: #56d364; }
+
+/* A muted left edge on the row itself, so the level is legible even when the
+   name column is scrolled out of view. */
+tr.imp-row-critical td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+tr.imp-row-high td:first-child { box-shadow: inset 3px 0 0 var(--yellow); }
+tr.imp-row-low td:first-child { box-shadow: inset 3px 0 0 var(--green); }
+
+.imp-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px;
+}
+.imp-dot.critical { background: var(--red); }
+.imp-dot.high { background: var(--yellow); }
+.imp-dot.normal { background: var(--text-faint); }
+.imp-dot.low { background: var(--green); }
+.imp-dot.none { background: transparent; border: 1px solid var(--text-faint); }
+
+/* ---------- Right-click importance menu ---------- */
+.menu-backdrop {
+  position: fixed; inset: 0; z-index: 200;
+}
+.ctxmenu {
+  position: fixed;
+  z-index: 201;
+  min-width: 180px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 30px rgba(0,0,0,.55);
+  padding: 4px;
+  /* Clamped to the viewport so a row near the right or bottom edge does not
+     open a menu the user cannot reach. */
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+}
+.menu-head {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+}
+.menu-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.menu-item:hover { background: rgba(255,255,255,.06); }
+.menu-item.on { border-color: var(--border); background: rgba(255,255,255,.04); }
+.menu-item .menu-check { margin-left: auto; color: var(--accent); }
+.menu-sep { height: 1px; background: var(--border-soft); margin: 4px 0; }

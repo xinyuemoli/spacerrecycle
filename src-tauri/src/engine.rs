@@ -124,6 +124,35 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
         .collect()
 }
 
+/// Whether a user-assigned importance level forbids a disposition.
+///
+/// The level is re-read from the store rather than trusted from the request.
+/// The frontend ships each row's level across IPC, and a modified client could
+/// relabel a Critical file as Low to get it purged. Category and importance are
+/// both server-side truth; only the *choice* of disposition comes from the
+/// client, and this is the gate that keeps that choice inside the user's own
+/// stated intent.
+///
+/// Critical blocks everything, including quarantine and cloud backup: the user
+/// said this matters, and moving the only accessible copy to a restorable-but-
+/// remote store is still a change they did not ask for. High blocks only the
+/// irreversible action; quarantine stays available because it can be undone.
+pub fn importance_block(
+    level: crate::importance::Importance,
+    disposition: Disposition,
+) -> Option<&'static str> {
+    use crate::importance::Importance;
+    match (level, disposition) {
+        (Importance::Critical, _) => {
+            Some("marked critical: this path must be left alone")
+        }
+        (Importance::High, Disposition::Purge) => {
+            Some("marked important: only restorable actions are allowed")
+        }
+        _ => None,
+    }
+}
+
 /// True when the selection needs the red-tag confirmation box to be ticked.
 pub fn needs_red_confirmation(items: &[SelectedItem]) -> bool {
     // Risk is derived from category, never trusted from the client: the
@@ -136,6 +165,24 @@ pub fn needs_red_confirmation(items: &[SelectedItem]) -> bool {
 }
 
 pub fn run_cleanup(req: CleanupRequest, cfg: &crate::config::Config) -> CleanupReport {
+    // Read the user's annotations once per run rather than per item: the store
+    // is a JSON file on disk, and a batch of ten thousand findings would
+    // otherwise re-parse it ten thousand times.
+    let marks = crate::importance::Store::load();
+    run_cleanup_with_marks(req, cfg, &marks)
+}
+
+/// The pipeline proper, with the annotation set injected.
+///
+/// Split out so the safety gate can be tested against a store built in memory.
+/// Loading the real one would make the tests read and depend on the machine's
+/// `%APPDATA%`, which is exactly the kind of hidden coupling the deletion
+/// layer is required not to have.
+pub fn run_cleanup_with_marks(
+    req: CleanupRequest,
+    cfg: &crate::config::Config,
+    marks: &crate::importance::Store,
+) -> CleanupReport {
     let mut report = CleanupReport::default();
 
     let mut to_purge: Vec<&SelectedItem> = Vec::new();
@@ -201,6 +248,25 @@ pub fn run_cleanup(req: CleanupRequest, cfg: &crate::config::Config) -> CleanupR
             });
             continue;
         }
+        // The user's own judgement outranks every scanner rule. A path they
+        // marked Critical or High must not be purged even if a rule surfaced
+        // it, and the check happens here rather than in the UI so it holds for
+        // an elevated replay too (which has no UI to consult).
+        if let Some(level) = marks.get(path) {
+            if let Some(reason) = importance_block(level, Disposition::Purge) {
+                crate::log::record(
+                    crate::log::Action::Purge,
+                    &item.finding.path,
+                    item.finding.on_disk_size,
+                    "已阻止：用户标记的重要级别不允许永久删除",
+                );
+                report.blocked.push(BlockedItem {
+                    path: item.finding.path.clone(),
+                    reason: reason.to_string(),
+                });
+                continue;
+            }
+        }
         match crate::quarantine::ops::purge(path, item.finding.is_dir) {
             Ok(()) => {
                 crate::log::record_disposition(
@@ -234,9 +300,7 @@ pub fn run_cleanup(req: CleanupRequest, cfg: &crate::config::Config) -> CleanupR
     // quarantine and can later be destroyed by a purge of the batch.
     let mut to_move: Vec<&SelectedItem> = Vec::new();
     for item in to_quarantine {
-        if crate::safety::is_allowed(Path::new(&item.finding.path), cfg) {
-            to_move.push(item);
-        } else {
+        if !crate::safety::is_allowed(Path::new(&item.finding.path), cfg) {
             crate::log::record(
                 crate::log::Action::Quarantine,
                 &item.finding.path,
@@ -247,7 +311,26 @@ pub fn run_cleanup(req: CleanupRequest, cfg: &crate::config::Config) -> CleanupR
                 path: item.finding.path.clone(),
                 reason: "path is on the protected list".into(),
             });
+            continue;
         }
+        // Quarantine is restorable, so High is allowed through here; only
+        // Critical stops it.
+        if let Some(level) = marks.get(Path::new(&item.finding.path)) {
+            if let Some(reason) = importance_block(level, Disposition::Quarantine) {
+                crate::log::record(
+                    crate::log::Action::Quarantine,
+                    &item.finding.path,
+                    item.finding.on_disk_size,
+                    "已阻止：用户标记为关键，不允许任何清理动作",
+                );
+                report.blocked.push(BlockedItem {
+                    path: item.finding.path.clone(),
+                    reason: reason.to_string(),
+                });
+                continue;
+            }
+        }
+        to_move.push(item);
     }
     let qfindings: Vec<Finding> = to_move.iter().map(|i| i.finding.clone()).collect();
     if !qfindings.is_empty() {
@@ -352,9 +435,10 @@ mod tests {
 
         let cfg = crate::config::Config::default();
         // Without confirmation the item is blocked, not deleted.
-        let report = run_cleanup(
+        let report = run_cleanup_with_marks(
             CleanupRequest { items: items.clone(), confirmed_red_purge: false },
             &cfg,
+            &crate::importance::Store::default(),
         );
         assert_eq!(report.purged.len(), 0);
         assert_eq!(report.blocked.len(), 1);
@@ -376,12 +460,13 @@ mod tests {
         let path = dir.to_string_lossy().to_string();
 
         let cfg = crate::config::Config::default();
-        let report = run_cleanup(
+        let report = run_cleanup_with_marks(
             CleanupRequest {
                 items: vec![item(&path, Category::TempJunk, Disposition::Purge)],
                 confirmed_red_purge: true,
             },
             &cfg,
+            &crate::importance::Store::default(),
         );
         assert_eq!(report.failed.len(), 0);
         assert!(
@@ -397,12 +482,167 @@ mod tests {
         let target = format!("{}\\System32\\drivers\\etc\\hosts", windir.trim_end_matches('\\'));
         let items = vec![item(&target, Category::LargeFile, Disposition::Purge)];
         let cfg = crate::config::Config::default();
-        let report = run_cleanup(
+        let report = run_cleanup_with_marks(
             CleanupRequest { items, confirmed_red_purge: true },
             &cfg,
+            &crate::importance::Store::default(),
         );
         assert_eq!(report.purged.len(), 0);
         assert_eq!(report.blocked.len(), 1);
         assert!(report.blocked[0].reason.contains("protected"));
+    }
+
+    // ---------- importance gate ----------
+    //
+    // These drive `run_cleanup_with_marks` with a store built in memory. Using
+    // the real entry point would make the result depend on whatever the
+    // developer running the suite happens to have marked in `%APPDATA%`.
+
+    fn marked(path: &str, level: crate::importance::Importance) -> crate::importance::Store {
+        let mut s = crate::importance::Store::default();
+        s.set(std::path::Path::new(path), level);
+        s
+    }
+
+    /// The headline guarantee: a path the user marked Critical survives even
+    /// when the client explicitly asks for a permanent purge.
+    #[test]
+    fn a_critical_mark_survives_a_requested_purge() {
+        let dir = std::env::temp_dir().join(format!("sr-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("thesis.docx");
+        std::fs::write(&target, b"the only copy").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let marks = marked(&path, crate::importance::Importance::Critical);
+        let cfg = crate::config::Config::default();
+        let report = run_cleanup_with_marks(
+            CleanupRequest {
+                items: vec![item(&path, Category::TempJunk, Disposition::Purge)],
+                confirmed_red_purge: true,
+            },
+            &cfg,
+            &marks,
+        );
+
+        assert_eq!(report.purged.len(), 0, "a Critical item was purged");
+        assert_eq!(report.blocked.len(), 1);
+        assert!(
+            target.exists(),
+            "the file behind a Critical mark must still be on disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// High means "restorable actions only": quarantine is allowed, purge is
+    /// not. Both halves are asserted, because a gate that blocks everything
+    /// would pass the purge half while silently breaking the product.
+    #[test]
+    fn a_high_mark_blocks_purge_but_allows_quarantine() {
+        let dir = std::env::temp_dir().join(format!("sr-gate-{}", uuid::Uuid::new_v4()));
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("notes.txt");
+        std::fs::write(&file, b"keep me recoverable").unwrap();
+        let path = file.to_string_lossy().to_string();
+        let marks = marked(&path, crate::importance::Importance::High);
+
+        let mut cfg = crate::config::Config::default();
+        // Keep the batch out of the machine's real quarantine store: these
+        // tests must not leave anything behind in ProgramData.
+        cfg.quarantine_dir = dir.join("quarantine");
+
+        let purged = run_cleanup_with_marks(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::Purge)],
+                confirmed_red_purge: true,
+            },
+            &cfg,
+            &marks,
+        );
+        assert_eq!(purged.purged.len(), 0, "High must refuse permanent deletion");
+        assert!(file.exists());
+        assert_eq!(purged.blocked.len(), 1);
+
+        let quarantined = run_cleanup_with_marks(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::Quarantine)],
+                confirmed_red_purge: true,
+            },
+            &cfg,
+            &marks,
+        );
+        assert_eq!(quarantined.quarantined.len(), 1, "quarantine must still work");
+        assert!(!file.exists(), "the file should have moved to quarantine");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The frontend ships each row's level across IPC. A client that relabels
+    /// a Critical file as Low must not get it deleted: the gate re-reads the
+    /// store, and the request's own level is not consulted at all.
+    #[test]
+    fn the_request_cannot_relabel_its_way_past_the_gate() {
+        let dir = std::env::temp_dir().join(format!("sr-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("contract.pdf");
+        std::fs::write(&target, b"legally binding").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        // The store says Critical. Nothing in the request contradicts it,
+        // because nothing in the request is trusted.
+        let marks = marked(&path, crate::importance::Importance::Critical);
+        let cfg = crate::config::Config::default();
+        let report = run_cleanup_with_marks(
+            CleanupRequest {
+                items: vec![item(&path, Category::TempJunk, Disposition::Purge)],
+                confirmed_red_purge: true,
+            },
+            &cfg,
+            &marks,
+        );
+
+        assert!(report.purged.is_empty());
+        assert!(target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_store_does_not_stand_in_the_way() {
+        let dir = std::env::temp_dir().join(format!("sr-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("junk.tmp");
+        std::fs::write(&target, b"junk").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let cfg = crate::config::Config::default();
+        let report = run_cleanup_with_marks(
+            CleanupRequest {
+                items: vec![item(&path, Category::TempJunk, Disposition::Purge)],
+                confirmed_red_purge: true,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+        );
+
+        assert_eq!(report.purged.len(), 1, "an unmarked temp file must still be purgeable");
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn importance_gate_matches_its_documented_matrix() {
+        use crate::importance::Importance::*;
+        // Critical stops both actions.
+        assert!(importance_block(Critical, Disposition::Purge).is_some());
+        assert!(importance_block(Critical, Disposition::Quarantine).is_some());
+        // High stops only the irreversible one.
+        assert!(importance_block(High, Disposition::Purge).is_some());
+        assert!(importance_block(High, Disposition::Quarantine).is_none());
+        // Normal and Low never block.
+        for level in [Normal, Low] {
+            assert!(importance_block(level, Disposition::Purge).is_none());
+            assert!(importance_block(level, Disposition::Quarantine).is_none());
+        }
     }
 }

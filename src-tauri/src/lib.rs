@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod config;
 pub mod engine;
+pub mod importance;
 pub mod log;
 pub mod model;
 pub mod quarantine;
@@ -17,6 +18,7 @@ pub mod probe_cancel;
 pub mod testing {
     pub use crate::config::Config;
     pub use crate::engine::{build_preview, needs_red_confirmation, run_cleanup, CleanupRequest, SelectedItem};
+    pub use crate::importance::{Importance, Store as ImportanceStore};
     pub use crate::log::{Action as LogAction, Entry as LogEntry};
     pub use crate::model::{AgeBasis, Category, Disposition, Finding, RiskTier};
     pub use crate::quarantine::{
@@ -80,6 +82,9 @@ pub fn run() {
             commands::audit_log_path,
             commands::retry_cleanup_elevated,
             commands::reveal_in_explorer,
+            commands::list_importance,
+            commands::set_importance,
+            commands::clear_importance,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SpaceRecycle");

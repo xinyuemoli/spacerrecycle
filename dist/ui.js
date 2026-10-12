@@ -3,6 +3,7 @@ import {
   selectedItems, selectionTotals, filteredFindings, categoryTotals,
   dirTotals, findingsInDir,
   categoryLabel, riskLabelOf, RISK_DOT, isExpired, ageDays, PAGE_SIZE,
+  importanceOf, IMPORTANCE_LEVELS, selectable,
 } from "./state.js";
 import { listen } from "./api.js";
 import { t } from "./i18n.js";
@@ -188,6 +189,7 @@ function shell() {
     <main id="r-main"></main>
     <div id="r-actionbar"></div>
     <div id="r-modal"></div>
+    <div id="r-menu"></div>
     <div id="r-toast"></div>
   `;
 }
@@ -203,8 +205,36 @@ function layoutParts() {
       : state.tab === "settings" ? settingsView() : quarantineView(),
     actionbar: state.tab === "findings" && state.selected.size ? actionBar() : "",
     modal: state.preview ? previewModal() : "",
+    menu: state.menu ? importanceMenu() : "",
     toast: state.toast ? `<div class="toast ${esc(state.toast.kind)}">${esc(state.toast.msg)}</div>` : "",
   };
+}
+
+/**
+ * The right-click importance menu.
+ *
+ * Rendered as a fixed-position card at the pointer rather than a native
+ * browser context menu: the app is a webview with no menu API, and a native
+ * menu cannot be styled or localised. Clicking anywhere else closes it via the
+ * backdrop in `bind()`.
+ */
+function importanceMenu() {
+  const m = state.menu;
+  const current = m.level;
+  const item = (level) => h`
+    <button class="menu-item ${current === level ? "on" : ""}" data-act="set-imp" data-level="${level}">
+      <span class="imp-dot ${level}"></span>
+      <span>${T("imp." + level)}</span>
+      ${current === level ? `<span class="menu-check">✓</span>` : ""}
+    </button>`;
+  return h`
+    <div class="menu-backdrop" data-act="close-menu"></div>
+    <div class="ctxmenu" style="left:${Math.round(m.x)}px;top:${Math.round(m.y)}px">
+      <div class="menu-head" title="${esc(m.path)}">${esc(m.name)}</div>
+      ${IMPORTANCE_LEVELS.map(item).join("")}
+      ${current ? `<div class="menu-sep"></div>
+        <button class="menu-item" data-act="clear-imp"><span class="imp-dot none"></span><span>${T("imp.clear")}</span></button>` : ""}
+    </div>`;
 }
 
 function tabBar() {
@@ -427,6 +457,10 @@ function findingsView() {
       </select>
       <button class="sm" data-act="selall" data-on="1">${T("find.selectAll")}</button>
       <button class="sm" data-act="selall" data-on="0">${T("find.selectNone")}</button>
+      <select data-act="imp-filter" title="${T("imp.filterHint")}">
+        <option value="all" ${state.importanceFilter === "all" ? "selected" : ""}>${T("imp.filterAll")}</option>
+        ${IMPORTANCE_LEVELS.map(l => `<option value="${l}" ${state.importanceFilter === l ? "selected" : ""}>${T("imp." + l)}</option>`).join("")}
+      </select>
       <div class="spacer"></div>
       <span class="faint" style="font-size:11px" data-role="shown-count">${T("find.shown", { shown: filtered.length, total: state.findings.length })}</span>
     </div>
@@ -484,21 +518,40 @@ function row(f) {
   const sel = state.selected.has(f.id);
   const d = effectiveDisposition(f);
   const overridden = state.overrides.has(f.id);
+  const level = importanceOf(f);
+  // A critical mark means "leave this alone". The row stays visible - the user
+  // still needs to see what is on their disk - but it cannot be acted on, and
+  // the backend would refuse anyway.
+  const locked = !selectable(f);
+  const noPurge = level === "critical" || level === "high";
+
+  let options;
+  if (locked) {
+    options = `<option value="">${T("imp.noAction")}</option>`;
+  } else if (f.category === "temp_junk" || f.category === "system_cache") {
+    // Temp files normally offer purge and nothing else. A High mark removes
+    // that option, and quarantine is the only restorable alternative - so it
+    // becomes the offer rather than an empty, unusable dropdown.
+    options = noPurge
+      ? `<option value="quarantine" ${d === "quarantine" ? "selected" : ""}>${T("disp.quarantine")}</option>`
+      : `<option value="purge" ${d === "purge" ? "selected" : ""}>${T("disp.purge")}</option>`;
+  } else {
+    options = `${noPurge ? "" : `<option value="" ${!overridden ? "selected" : ""}>${T("disp.default")}</option>`}
+       ${noPurge ? "" : `<option value="purge" ${d === "purge" ? "selected" : ""}>${T("disp.purge")}</option>`}
+       <option value="quarantine" ${d === "quarantine" ? "selected" : ""}>${T("disp.quarantine")}</option>`;
+  }
+
   return h`
-    <tr class="${sel ? "selected" : ""}" data-id="${esc(f.id)}" data-cat="${esc(f.category)}">
-      <td><input type="checkbox" data-act="sel" data-id="${esc(f.id)}" ${sel ? "checked" : ""} /></td>
-      <td class="name" title="${esc(f.path)}" data-act="reveal" data-path="${esc(f.path)}">${esc(f.name)}</td>
+    <tr class="${sel ? "selected" : ""} ${level ? "imp-row-" + level : ""}" data-id="${esc(f.id)}" data-cat="${esc(f.category)}" data-ctx="1" title="${T("imp.hint")}">
+      <td><input type="checkbox" data-act="sel" data-id="${esc(f.id)}" ${sel ? "checked" : ""} ${locked ? "disabled" : ""} /></td>
+      <td class="name" title="${esc(f.path)}" data-act="reveal" data-path="${esc(f.path)}">${level ? `<span class="imp-badge ${level}">${T("imp.short." + level)}</span>` : ""}${esc(f.name)}</td>
       <td class="num">${fmtBytes(f.logicalSize)}</td>
       <td class="num">${fmtBytes(f.onDiskSize)}</td>
       <td class="num">${fmtAge(f.ageDays)}</td>
       <td class="num faint">${fmtWhen(f.lastAccessUnix)}</td>
       <td>
-        <select data-act="dispo" data-id="${esc(f.id)}" class="dispo">
-          ${f.category === "temp_junk" || f.category === "system_cache"
-            ? `<option value="purge" ${d === "purge" ? "selected" : ""}>${T("disp.purge")}</option>`
-            : `<option value="" ${!overridden ? "selected" : ""}>${T("disp.default")}</option>
-               <option value="purge" ${d === "purge" ? "selected" : ""}>${T("disp.purge")}</option>
-               <option value="quarantine" ${d === "quarantine" ? "selected" : ""}>${T("disp.quarantine")}</option>`}
+        <select data-act="dispo" data-id="${esc(f.id)}" class="dispo" ${locked ? "disabled" : ""}>
+          ${options}
         </select>
       </td>
     </tr>`;
@@ -778,6 +831,15 @@ function bind() {
       if (confirm(T("q.purgeExpiredConfirm"))) actions.purgeExpired();
     }
     else if (act === "save-settings") actions.saveSettings(collectSettings());
+    else if (act === "set-imp") {
+      // The menu can be dismissed between the click and this handler landing,
+      // so the path is read from the menu rather than from the row.
+      if (state.menu) actions.setImportance(state.menu.path, t.dataset.level);
+    }
+    else if (act === "clear-imp") {
+      if (state.menu) actions.clearImportance(state.menu.path);
+    }
+    else if (act === "close-menu") actions.closeMenu();
     else if (act === "goto-cat") {
       // Jump to the findings tab, filtered to this one category's risk tier.
       // The two branches used to be identical ("all" either way), which
@@ -796,6 +858,7 @@ function bind() {
     else if (act === "risk") actions.setRiskFilter(t.value);
     else if (act === "batch-dispo") actions.setBatchDisposition(t.value);
     else if (act === "dispo") actions.setOverride(t.dataset.id, t.value || null);
+    else if (act === "imp-filter") actions.setImportanceFilter(t.value);
     else if (act === "red-confirm") actions.setRedConfirm(t.checked);
     else if (act === "lang") actions.setLang(t.value);
     // "sel" and "cat-sel" are deliberately absent: they are checkboxes, and
@@ -806,6 +869,16 @@ function bind() {
   root.addEventListener("input", (e) => {
     const t = e.target.closest("[data-act='search']");
     if (t) actions.setQuery(t.value);
+  });
+
+  // Right-click on a finding row opens the importance menu. The webview's own
+  // menu is suppressed: it offers "Reload" and "Inspect", neither of which
+  // belongs in a shipped desktop app.
+  root.addEventListener("contextmenu", (e) => {
+    const tr = e.target.closest("tr[data-ctx]");
+    if (!tr) return;
+    e.preventDefault();
+    actions.openMenu(tr.dataset.id, e.clientX, e.clientY);
   });
 }
 
@@ -826,6 +899,16 @@ export async function boot() {
   // racing the first one), the old listener would double every progress
   // event instead of being replaced.
   unlistenProgress = await listen("scan-progress", (e) => actions.onProgress(e.payload));
+  // Escape closes the importance menu, matching every other dismissable
+  // surface. Bound here rather than in bind(): bind() attaches delegated
+  // listeners to #app, but this one belongs to the document, and the headless
+  // harnesses drive render() with a DOM stub that has no document listeners.
+  if (!menuKeyHandler) {
+    menuKeyHandler = (e) => {
+      if (e.key === "Escape" && state.menu) actions.closeMenu();
+    };
+    document.addEventListener("keydown", menuKeyHandler);
+  }
   await render();
   await actions.loadOverview();
 }
@@ -833,5 +916,10 @@ export async function boot() {
 /** Detach the scan-progress listener. Used by tests and on teardown. */
 export function dispose() {
   if (unlistenProgress) { unlistenProgress(); unlistenProgress = null; }
+  if (menuKeyHandler) {
+    document.removeEventListener("keydown", menuKeyHandler);
+    menuKeyHandler = null;
+  }
 }
 let unlistenProgress = null;
+let menuKeyHandler = null;

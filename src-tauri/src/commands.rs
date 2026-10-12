@@ -427,3 +427,38 @@ pub async fn read_audit_log(limit: Option<usize>) -> Vec<crate::log::Entry> {
 pub fn audit_log_path() -> Option<String> {
     crate::log::log_path().map(|p| p.to_string_lossy().to_string())
 }
+
+/// Every importance mark the user has set, most important first.
+///
+/// The UI keeps this as a path-keyed map and stamps it onto rendered rows, so
+/// a mark is visible immediately after a re-scan without the scanners having
+/// to know the store exists.
+#[tauri::command]
+pub async fn list_importance() -> Vec<crate::importance::Entry> {
+    offload(|| crate::importance::Store::load().entries()).await
+}
+
+/// Set or replace the importance level of one path.
+#[tauri::command]
+pub async fn set_importance(
+    path: String,
+    level: crate::importance::Importance,
+) -> Result<(), String> {
+    offload(move || {
+        let mut store = crate::importance::Store::load();
+        store.set(std::path::Path::new(&path), level);
+        store.save().map_err(|e| format!("无法保存重要级别：{e}"))
+    })
+    .await
+}
+
+/// Clear the importance mark of one path.
+#[tauri::command]
+pub async fn clear_importance(path: String) -> Result<(), String> {
+    offload(move || {
+        let mut store = crate::importance::Store::load();
+        store.remove(std::path::Path::new(&path));
+        store.save().map_err(|e| format!("无法保存重要级别：{e}"))
+    })
+    .await
+}

@@ -25,6 +25,17 @@ const state = {
   toast: null,
   config: null,
   lang: detectLang(),       // "zh" | "en"
+  /**
+   * User-assigned importance marks, keyed by normalized path.
+   *
+   * Kept beside the findings rather than on them: the backend owns the store
+   * (so the cleanup gate can enforce it server-side), and a re-scan rebuilds
+   * every finding from scratch. Re-reading the map after a scan is what makes
+   * a mark survive one.
+   */
+  marks: new Map(),         // normalized path -> "critical" | "high" | "normal" | "low"
+  importanceFilter: "all",  // "all" | level, for the findings toolbar
+  menu: null,               // { path, name, level, x, y } right-click menu anchor
 };
 
 export { state };
@@ -136,15 +147,56 @@ export function toast(msg, kind = "") {
 }
 
 // ---------- derived ----------
+
+/** The importance levels, most important first. Drives the menu and the filter. */
+export const IMPORTANCE_LEVELS = ["critical", "high", "normal", "low"];
+
+/**
+ * Normalize a path into the same key form the backend store uses.
+ *
+ * Windows paths are case-insensitive and the same file reaches the UI with
+ * forward slashes from one place and backslashes from another. If these keys
+ * did not match the ones the Rust side writes, a mark would appear to save and
+ * then silently fail to apply.
+ */
+export function normPath(p) {
+  const s = String(p == null ? "" : p).replace(/\//g, "\\").replace(/\\+$/, "");
+  return (s || String(p == null ? "" : p)).toLowerCase();
+}
+
+/** The importance level of a finding, or null when unmarked. */
+export function importanceOf(f) {
+  return (f && state.marks.get(normPath(f.path))) || null;
+}
+
+/** Sort rank, most important first. Unmarked sorts last. */
+export function importanceRank(level) {
+  const i = IMPORTANCE_LEVELS.indexOf(level);
+  return i < 0 ? IMPORTANCE_LEVELS.length : i;
+}
+
+/**
+ * A mark of critical or high takes the irreversible option off the table.
+ *
+ * The backend re-checks this and refuses regardless, but offering a button
+ * that is guaranteed to be refused is worse than not offering it: the user
+ * would confirm an irreversible action and get a "blocked" row instead.
+ */
+export function clampDisposition(f, d) {
+  const level = importanceOf(f);
+  if (d === "purge" && (level === "critical" || level === "high")) return "quarantine";
+  return d;
+}
+
 export function effectiveDisposition(f) {
   const o = state.overrides.get(f.id);
-  if (o) return o;
-  if (state.batchDisposition === "purge" && f.category !== "temp_junk" && f.category !== "system_cache") return "purge";
+  if (o) return clampDisposition(f, o);
+  if (state.batchDisposition === "purge" && f.category !== "temp_junk" && f.category !== "system_cache") return clampDisposition(f, "purge");
   if (state.batchDisposition === "quarantine") return "quarantine";
   if (state.batchDisposition === "split") {
     return (f.category === "temp_junk" || f.category === "system_cache") ? "purge" : "quarantine";
   }
-  return f.disposition;
+  return clampDisposition(f, f.disposition);
 }
 
 export function selectedItems() {
@@ -161,10 +213,22 @@ export function filteredFindings() {
   const q = state.query.trim().toLowerCase();
   const list = state.findings.filter(f => {
     if (state.riskFilter !== "all" && f.risk !== state.riskFilter) return false;
+    if (state.importanceFilter !== "all" && importanceOf(f) !== state.importanceFilter) return false;
     if (q && !(f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q))) return false;
     return true;
   });
   return sortFindings(list);
+}
+
+/**
+ * Rows the user is allowed to select.
+ *
+ * A critical mark means "leave this alone": the backend refuses every
+ * disposition for it, so a checkbox that can be ticked would only produce a
+ * preview full of rows guaranteed to be blocked.
+ */
+export function selectable(f) {
+  return importanceOf(f) !== "critical";
 }
 
 /**
@@ -262,6 +326,10 @@ export const actions = {
     } catch (e) {
       toast(t(state.lang, "toast.overviewFail", { e }), "err");
     }
+    // Marks are loaded alongside the overview because the findings tab can be
+    // reached without ever opening it, and a badge that only appears after a
+    // second visit would look like the save had failed.
+    await actions.loadImportance();
     render();
   },
 
@@ -383,6 +451,8 @@ export const actions = {
   },
 
   toggleSel(id) {
+    const f = state.findings.find(x => x.id === id);
+    if (f && !selectable(f)) return;
     if (state.selected.has(id)) state.selected.delete(id); else state.selected.add(id);
     // Ticking a row cannot change the table itself, only checkbox and
     // highlight state, so it skips the full re-render.
@@ -392,16 +462,89 @@ export const actions = {
   toggleCat(cat, on) {
     for (const f of state.findings) {
       if (f.category !== cat) continue;
+      if (on && !selectable(f)) continue;
       if (on) state.selected.add(f.id); else state.selected.delete(f.id);
     }
     if (state.tab === "findings") renderSelectionOnly(); else render();
   },
 
   selAll(on) {
-    if (on) for (const f of filteredFindings()) state.selected.add(f.id);
+    if (on) for (const f of filteredFindings()) { if (selectable(f)) state.selected.add(f.id); }
     else for (const f of filteredFindings()) state.selected.delete(f.id);
     // Select-all can cross the filter boundary, so the visible set itself
     // may have changed: this one does need the full path.
+    render();
+  },
+
+  // ---------- importance marks ----------
+
+  /** Reload every mark from the backend into the path-keyed map. */
+  async loadImportance() {
+    try {
+      const entries = await invoke("list_importance");
+      const next = new Map();
+      for (const e of entries || []) next.set(normPath(e.path), e.level);
+      state.marks = next;
+    } catch (e) {
+      // A failed load must not wipe what is on screen; the gate still holds
+      // server-side, so the worst case is a badge that is out of date.
+      toast(t(state.lang, "imp.loadFail", { e }), "err");
+    }
+  },
+
+  /** Mark one path, then re-render so the badge and the filter update. */
+  async setImportance(path, level) {
+    try {
+      await invoke("set_importance", { path, level });
+      state.marks.set(normPath(path), level);
+      // A path that is no longer selectable must not stay selected.
+      const stillOk = new Set();
+      for (const id of state.selected) {
+        const f = state.findings.find(x => x.id === id);
+        if (f && selectable(f)) stillOk.add(id);
+      }
+      state.selected = stillOk;
+      state.menu = null;
+      render();
+    } catch (e) {
+      state.menu = null;
+      toast(t(state.lang, "imp.saveFail", { e }), "err");
+      render();
+    }
+  },
+
+  async clearImportance(path) {
+    try {
+      await invoke("clear_importance", { path });
+      state.marks.delete(normPath(path));
+      state.menu = null;
+      render();
+    } catch (e) {
+      state.menu = null;
+      toast(t(state.lang, "imp.saveFail", { e }), "err");
+      render();
+    }
+  },
+
+  setImportanceFilter(level) { state.importanceFilter = level; render(); },
+
+  /** Open the right-click importance menu for one finding. */
+  openMenu(id, x, y) {
+    const f = state.findings.find(v => v.id === id);
+    if (!f) return;
+    state.menu = {
+      path: f.path,
+      name: f.name,
+      level: importanceOf(f),
+      x: Number(x) || 0,
+      y: Number(y) || 0,
+    };
+    render();
+  },
+
+  closeMenu() {
+    if (!state.menu) return;
+    state.menu = null;
     render();
   },
 

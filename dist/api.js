@@ -30,6 +30,7 @@ function stub(cmd) {
     case "quarantine_expiry":
       return { expiryDays: 7, expiredBatches: [], expiredItems: 0, expiredOnDiskBytes: 0 };
     case "list_quarantine_batches": return [];
+    case "list_importance": return [];
     case "build_preview": return [];
     case "needs_red_confirmation": return false;
     default: return null;
