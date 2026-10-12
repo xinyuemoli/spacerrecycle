@@ -840,6 +840,7 @@ function accountCard() {
         <button class="sm" data-act="acc-signout">${T("acc.signOut")}</button>
       </div>
       <div class="faint mt" style="font-size:11px">${T("acc.scopeNote")}</div>
+      ${q ? `<div class="faint" style="font-size:11px;margin-top:6px">${T("acc.backupWhere")}</div>` : ""}
     </div>`;
 }
 
