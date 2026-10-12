@@ -22,13 +22,23 @@ Five parallel scanners sharing one unified finding model:
 | **Dev artifacts** | `node_modules`, `Cargo\target`, `.venv`, pip/npm/pnpm caches, `__pycache__`, Gradle/Maven, `.nuget` | 10–100+ GB |
 | **Large files** | Files over a threshold (default 500 MB), aggregated by directory into a drill-down | locates, then quarantines |
 | **App leftovers** | Directories left by uninstalled apps, stale installers | 5–50 GB |
+| **OneDrive local copies** | Cloud-backed content whose local download can be released — the file stays in OneDrive | whatever you have cached |
 
 Plus:
 
 - **Quarantine with NTFS compression** — "deleted" items are moved to a restorable, transparently-compressed store, never destroyed until *you* purge them.
-- **Explicit disposition** — each item is either *purged permanently* or *moved to quarantine*, never collapsed into a single ambiguous click.
-- **Risk tags** — `temp/cache` (safe), `dev artifact` (rebuildable), `large file` (personal data), `app leftover` (may contain user data). Red items need an extra confirmation before permanent purge.
-- **Audit log** — every cleanup / restore / purge is written to a traceable log.
+- **Explicit disposition** — each item is either *purged permanently*, *moved to quarantine*, or (for OneDrive content) *released locally*, never collapsed into a single ambiguous click.
+- **Risk tags** — `temp/cache` (safe), `dev artifact` (rebuildable), `large file` (personal data), `app leftover` (may contain user data), `cloud copy` (a cached download). Red items need an extra confirmation before permanent purge.
+- **Importance marks** — right-click any row to mark it *Critical / Important / Normal / Disposable*. The level is stored by path, survives a re-scan, and is enforced in the cleanup pipeline itself: Critical refuses every action, Important refuses permanent deletion.
+- **Audit log** — every cleanup / release / restore / purge is written to a traceable log.
+
+## OneDrive: reclaim without deleting
+
+OneDrive's Files On-Demand keeps a placeholder on disk for every file. SpaceRecycle reads those placeholders and reports, per top-level folder, how much this machine is holding that the cloud already has.
+
+Releasing a copy sets `UNPINNED` and clears `PINNED` — the same thing Explorer's *Free up space* does. Files you pinned are never touched, and the operation is refused outside a real sync root. Nothing is uploaded, deleted, or sent anywhere: **no account, no network request, no API key.** Windows re-downloads the file the moment you open it.
+
+Cloud findings can only ever be *released*. Deleting a placeholder inside a sync root deletes the cloud file too, so purge and quarantine are refused outright for them regardless of what the UI is asked for.
 
 ## Core principle
 
@@ -59,18 +69,25 @@ Run tests:
 ```sh
 cargo test                        # Rust integration tests (scanners, cleanup, quarantine, audit)
 
-# Frontend tests: standalone .mjs harnesses, each driving a real headless
-# browser. They require `playwright` and its Chromium (see each file's CHROME path).
-node dist/_test_dom.mjs
-node dist/_test_scan_state.mjs
+# Frontend tests: standalone harnesses. Most stub the DOM and need no browser;
+# run them all with plain node.
 node dist/_test_render.mjs
 node dist/_test_scan.mjs
 node dist/_test_settings.mjs
+node dist/_test_importance.mjs
+node dist/_test_cloud.mjs
+node dist/_test_subscription.mjs
+
+# These two drive a real headless browser and need `playwright` + Chromium.
+# Without it they print SKIP and exit 0 rather than failing.
+node dist/_test_dom.mjs
+node dist/_test_scan_state.mjs
 ```
 
 ## Safety model
 
 - **Path denylist** — `C:\Windows`, `Program Files`, user Documents/Desktop/Pictures, `System32`, and the profile root are never deleted or quarantined, even if a rule misfires.
+- **Server-side gates** — the cleanup pipeline re-reads the importance store and refuses on its own; a modified client cannot relabel its way past it.
 - **Preview first** — every cleanup passes a preview dialog grouped by disposition; there is no "clean all" path that skips it.
 - **No admin required** — scanning runs unprivileged; cleanup elevates via a UAC subprocess only when a permission error demands it.
 - **Testable deletion layer** — delete/move are pure functions with explicit path parameters, unit-tested against a temp directory.
