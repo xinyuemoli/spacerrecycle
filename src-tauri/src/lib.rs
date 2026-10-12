@@ -1,3 +1,4 @@
+pub mod cloud;
 pub mod commands;
 pub mod config;
 pub mod engine;
@@ -85,6 +86,7 @@ pub fn run() {
             commands::list_importance,
             commands::set_importance,
             commands::clear_importance,
+            commands::onedrive_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SpaceRecycle");

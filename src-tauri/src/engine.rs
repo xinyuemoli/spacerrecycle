@@ -33,6 +33,13 @@ pub struct CleanupReport {
     pub logical_purged: u64,
     pub on_disk_purged: u64,
     pub quarantine_batch: Option<String>,
+    /// Paths whose local cloud copies were released.
+    pub dehydrated: Vec<String>,
+    /// Bytes whose release was *requested*. OneDrive dehydrates in the
+    /// background, so this is not yet reclaimed space and the UI must say so.
+    pub dehydrate_requested_bytes: u64,
+    /// Files skipped because the user had pinned them.
+    pub dehydrate_pinned_files: u64,
     /// True when at least one item failed specifically because the process
     /// lacked permission. The UI uses this to offer elevation instead of
     /// silently reporting a partial cleanup.
@@ -86,6 +93,7 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
         let key = match it.disposition {
             Disposition::Purge => "purge",
             Disposition::Quarantine => "quarantine",
+            Disposition::Dehydrate => "dehydrate",
         };
         let e = groups.entry(key).or_insert((0, 0, 0, BTreeMap::new(), false));
         e.0 += 1;
@@ -100,16 +108,17 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
         }
     }
 
-    // Purge group first: it is the irreversible one and deserves the eye.
-    let order = ["purge", "quarantine"];
+    // Purge first: it is the irreversible one and deserves the eye. Releasing a
+    // local copy goes last - it is the only group here that destroys nothing.
+    let order = ["purge", "quarantine", "dehydrate"];
     order
         .iter()
         .filter_map(|k| {
             groups.get(*k).map(|(count, logical, on_disk, cats, red)| {
-                let disposition = if *k == "purge" {
-                    Disposition::Purge
-                } else {
-                    Disposition::Quarantine
+                let disposition = match *k {
+                    "purge" => Disposition::Purge,
+                    "quarantine" => Disposition::Quarantine,
+                    _ => Disposition::Dehydrate,
                 };
                 PreviewGroup {
                     disposition,
@@ -187,10 +196,12 @@ pub fn run_cleanup_with_marks(
 
     let mut to_purge: Vec<&SelectedItem> = Vec::new();
     let mut to_quarantine: Vec<&SelectedItem> = Vec::new();
+    let mut to_dehydrate: Vec<&SelectedItem> = Vec::new();
     for item in &req.items {
         match item.disposition {
             Disposition::Purge => to_purge.push(item),
             Disposition::Quarantine => to_quarantine.push(item),
+            Disposition::Dehydrate => to_dehydrate.push(item),
         }
     }
 
@@ -218,6 +229,22 @@ pub fn run_cleanup_with_marks(
 
     for item in &to_purge {
         let path = Path::new(&item.finding.path);
+        // Deleting a placeholder inside a sync root deletes the cloud file
+        // too, so a cloud-backed finding must never be purged - not even if a
+        // modified client asks for it. The only action it has is release.
+        if item.finding.category.is_cloud() {
+            crate::log::record(
+                crate::log::Action::Purge,
+                &item.finding.path,
+                item.finding.on_disk_size,
+                "已阻止：云端文件不能被永久删除",
+            );
+            report.blocked.push(BlockedItem {
+                path: item.finding.path.clone(),
+                reason: "cloud-backed items cannot be deleted; only their local copy can be released".into(),
+            });
+            continue;
+        }
         if !crate::safety::is_allowed(path, cfg) {
             crate::log::record(
                 crate::log::Action::Purge,
@@ -300,6 +327,21 @@ pub fn run_cleanup_with_marks(
     // quarantine and can later be destroyed by a purge of the batch.
     let mut to_move: Vec<&SelectedItem> = Vec::new();
     for item in to_quarantine {
+        // Moving a placeholder into quarantine would take the cloud file with
+        // it. Release is the only meaningful action for cloud-backed content.
+        if item.finding.category.is_cloud() {
+            crate::log::record(
+                crate::log::Action::Quarantine,
+                &item.finding.path,
+                item.finding.on_disk_size,
+                "已阻止：云端文件不能移入隔离区",
+            );
+            report.blocked.push(BlockedItem {
+                path: item.finding.path.clone(),
+                reason: "cloud-backed items cannot be quarantined; only their local copy can be released".into(),
+            });
+            continue;
+        }
         if !crate::safety::is_allowed(Path::new(&item.finding.path), cfg) {
             crate::log::record(
                 crate::log::Action::Quarantine,
@@ -371,6 +413,87 @@ pub fn run_cleanup_with_marks(
                         reason: e.clone(),
                     });
                 }
+            }
+        }
+    }
+
+    // Releasing local copies: the last group, and the only one that destroys
+    // nothing. Two gates apply - the path denylist shared with every other
+    // action, and the OneDrive-root check, which keeps the attribute rewrite
+    // away from ordinary files even if a scanner rule misfires.
+    for item in &to_dehydrate {
+        let path = Path::new(&item.finding.path);
+        if !crate::safety::is_allowed(path, cfg) {
+            crate::log::record(
+                crate::log::Action::Dehydrate,
+                &item.finding.path,
+                item.finding.on_disk_size,
+                "已阻止：路径在保护名单中",
+            );
+            report.blocked.push(BlockedItem {
+                path: item.finding.path.clone(),
+                reason: "path is on the protected list".into(),
+            });
+            continue;
+        }
+        if !crate::cloud::onedrive::is_in_onedrive(path) {
+            crate::log::record(
+                crate::log::Action::Dehydrate,
+                &item.finding.path,
+                item.finding.on_disk_size,
+                "已阻止：不在 OneDrive 同步目录内",
+            );
+            report.blocked.push(BlockedItem {
+                path: item.finding.path.clone(),
+                reason: "path is not inside a OneDrive folder".into(),
+            });
+            continue;
+        }
+        if let Some(level) = marks.get(path) {
+            if let Some(reason) = importance_block(level, Disposition::Dehydrate) {
+                crate::log::record(
+                    crate::log::Action::Dehydrate,
+                    &item.finding.path,
+                    item.finding.on_disk_size,
+                    "已阻止：用户标记的重要级别不允许释放",
+                );
+                report.blocked.push(BlockedItem {
+                    path: item.finding.path.clone(),
+                    reason: reason.to_string(),
+                });
+                continue;
+            }
+        }
+
+        match crate::cloud::onedrive::release_local_copies(path) {
+            Ok(r) => {
+                // Logged as a success even when some files were skipped: the
+                // per-file failures are reported separately below, and the
+                // bytes recorded are the ones actually requested.
+                crate::log::record_disposition(
+                    Disposition::Dehydrate,
+                    &item.finding.path,
+                    r.requested_bytes,
+                    r.failed.is_empty(),
+                );
+                report.dehydrated.push(item.finding.path.clone());
+                report.dehydrate_requested_bytes += r.requested_bytes;
+                report.dehydrate_pinned_files += r.pinned_files;
+                for f in r.failed {
+                    report.failed.push(BlockedItem { path: f.path, reason: f.reason });
+                }
+            }
+            Err(e) => {
+                crate::log::record_disposition(
+                    Disposition::Dehydrate,
+                    &item.finding.path,
+                    0,
+                    false,
+                );
+                report.failed.push(BlockedItem {
+                    path: item.finding.path.clone(),
+                    reason: e,
+                });
             }
         }
     }
@@ -636,6 +759,10 @@ mod tests {
         // Critical stops both actions.
         assert!(importance_block(Critical, Disposition::Purge).is_some());
         assert!(importance_block(Critical, Disposition::Quarantine).is_some());
+        // A Critical mark must also stop a release: pulling the only on-disk
+        // copy of something the user called critical is a change they did not
+        // ask for, however reversible it is in theory.
+        assert!(importance_block(Critical, Disposition::Dehydrate).is_some());
         // High stops only the irreversible one.
         assert!(importance_block(High, Disposition::Purge).is_some());
         assert!(importance_block(High, Disposition::Quarantine).is_none());
@@ -644,5 +771,99 @@ mod tests {
             assert!(importance_block(level, Disposition::Purge).is_none());
             assert!(importance_block(level, Disposition::Quarantine).is_none());
         }
+    }
+
+    // ---------- cloud-backed content ----------
+
+    /// Deleting a placeholder inside a sync root deletes the cloud file. A
+    /// client asking for a purge of a cloud finding must be refused, not
+    /// obeyed.
+    #[test]
+    fn a_cloud_finding_can_never_be_purged() {
+        let dir = std::env::temp_dir().join(format!("sr-cloud-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("holiday-photos");
+        std::fs::create_dir_all(&target).unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let cfg = crate::config::Config::default();
+        let report = run_cleanup_with_marks(
+            CleanupRequest {
+                items: vec![item(&path, Category::CloudPlaceholder, Disposition::Purge)],
+                confirmed_red_purge: true,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+        );
+
+        assert!(report.purged.is_empty(), "a cloud item was purged");
+        assert_eq!(report.blocked.len(), 1);
+        assert!(target.exists(), "the folder behind the placeholder is gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cloud_finding_can_never_be_quarantined() {
+        let dir = std::env::temp_dir().join(format!("sr-cloud-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("Documents");
+        std::fs::create_dir_all(&target).unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let mut cfg = crate::config::Config::default();
+        cfg.quarantine_dir = dir.join("quarantine");
+        let report = run_cleanup_with_marks(
+            CleanupRequest {
+                items: vec![item(&path, Category::CloudPlaceholder, Disposition::Quarantine)],
+                confirmed_red_purge: true,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+        );
+
+        assert!(report.quarantined.is_empty());
+        assert_eq!(report.blocked.len(), 1);
+        assert!(target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The OneDrive-root check is what keeps the attribute rewrite away from
+    /// ordinary files. A dehydrate request aimed at a plain temp folder must be
+    /// refused rather than silently reach into the filesystem attributes.
+    #[test]
+    fn dehydrating_outside_onedrive_is_refused() {
+        let dir = std::env::temp_dir().join(format!("sr-cloud-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("not-a-sync-root");
+        std::fs::create_dir_all(&target).unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let cfg = crate::config::Config::default();
+        let report = run_cleanup_with_marks(
+            CleanupRequest {
+                items: vec![item(&path, Category::CloudPlaceholder, Disposition::Dehydrate)],
+                confirmed_red_purge: true,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+        );
+
+        assert!(report.dehydrated.is_empty());
+        assert_eq!(report.blocked.len(), 1);
+        assert!(
+            report.blocked[0].reason.contains("not inside a OneDrive"),
+            "unexpected reason: {}",
+            report.blocked[0].reason
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn releasing_a_local_copy_needs_no_red_confirmation() {
+        // CloudCopy is not UserData, so the destructive-action gate must not
+        // fire. Requiring the red checkbox here would train the user to tick
+        // it without reading, which is exactly what it guards.
+        let items = vec![item("C:/Users/me/OneDrive/x", Category::CloudPlaceholder, Disposition::Dehydrate)];
+        assert!(!needs_red_confirmation(&items));
     }
 }

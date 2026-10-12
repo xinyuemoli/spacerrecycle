@@ -173,6 +173,7 @@ h2.section .hint { font-weight: 400; color: var(--text-faint); font-size: 12px; 
 .dot.rebuildable { background: var(--blue); }
 .dot.personal { background: var(--yellow); }
 .dot.userdata { background: var(--red); }
+.dot.cloud { background: var(--purple); }
 
 /* ---------- Toolbar ---------- */
 .toolbar {
@@ -474,3 +475,15 @@ tr.imp-row-low td:first-child { box-shadow: inset 3px 0 0 var(--green); }
 .menu-item.on { border-color: var(--border); background: rgba(255,255,255,.04); }
 .menu-item .menu-check { margin-left: auto; color: var(--accent); }
 .menu-sep { height: 1px; background: var(--border-soft); margin: 4px 0; }
+
+/* ---------- OneDrive card ---------- */
+.od-roots {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 2px;
+  overflow: hidden;
+}
+.od-roots span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

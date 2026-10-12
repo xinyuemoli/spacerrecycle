@@ -294,6 +294,8 @@ function overviewView() {
 
     ${bigFileRollup()}
 
+    ${onedriveCard()}
+
     <h2 class="section mt">${T("ov.cleanup")}</h2>
     <div class="card">
       <div class="toolbar" style="margin-bottom:0">
@@ -310,7 +312,41 @@ function overviewView() {
 }
 
 function riskOf(cat) {
-  return { temp_junk: "safe", system_cache: "safe", dev_artifact: "rebuildable", large_file: "personal", app_leftover: "userdata" }[cat];
+  return { temp_junk: "safe", system_cache: "safe", dev_artifact: "rebuildable", large_file: "personal", app_leftover: "userdata", cloud_placeholder: "cloud" }[cat];
+}
+
+/**
+ * OneDrive card.
+ *
+ * Rendered only when the backend actually found a sync root: a cloud section
+ * on a machine without OneDrive is clutter that also promises a feature which
+ * cannot do anything. The byte counts come from the scan, because measuring an
+ * OneDrive tree is a full walk and must not happen just to draw a card.
+ */
+function onedriveCard() {
+  const od = state.onedrive;
+  if (!od || !od.available) return "";
+  const cloud = state.findings.filter(f => f.category === "cloud_placeholder");
+  const reclaimable = cloud.reduce((s, f) => s + f.onDiskSize, 0);
+  const files = cloud.reduce((s, f) => s + (f.childCount || 0), 0);
+  return h`
+    <h2 class="section mt">${T("od.title")}</h2>
+    <div class="card">
+      <div class="od-roots">
+        <span class="dot purple"></span>
+        <span class="faint" style="font-size:12px">${esc(od.roots.join("  ·  "))}</span>
+      </div>
+      <div class="toolbar" style="margin:12px 0 0">
+        <button data-act="scan" data-cats="cloud_placeholder" ${state.scanning ? "disabled" : ""}>${T("od.scan")}</button>
+        ${cloud.length
+          ? `<span class="faint" style="font-size:12px">${T("od.summary", {
+              folders: cloud.length,
+              files: files,
+              size: fmtBytes(reclaimable),
+            })}</span>`
+          : `<span class="faint" style="font-size:12px">${T("od.hint")}</span>`}
+      </div>
+    </div>`;
 }
 
 /**
@@ -454,6 +490,7 @@ function findingsView() {
         <option value="rebuildable" ${state.riskFilter === "rebuildable" ? "selected" : ""}>${riskLabelOf("rebuildable")}</option>
         <option value="personal" ${state.riskFilter === "personal" ? "selected" : ""}>${riskLabelOf("personal")}</option>
         <option value="userdata" ${state.riskFilter === "userdata" ? "selected" : ""}>${riskLabelOf("userdata")}</option>
+        <option value="cloud" ${state.riskFilter === "cloud" ? "selected" : ""}>${riskLabelOf("cloud")}</option>
       </select>
       <button class="sm" data-act="selall" data-on="1">${T("find.selectAll")}</button>
       <button class="sm" data-act="selall" data-on="0">${T("find.selectNone")}</button>
@@ -528,6 +565,10 @@ function row(f) {
   let options;
   if (locked) {
     options = `<option value="">${T("imp.noAction")}</option>`;
+  } else if (f.category === "cloud_placeholder") {
+    // Cloud-backed content has exactly one meaningful action, so the dropdown
+    // is a statement rather than a choice.
+    options = `<option value="dehydrate" selected>${T("disp.dehydrate")}</option>`;
   } else if (f.category === "temp_junk" || f.category === "system_cache") {
     // Temp files normally offer purge and nothing else. A High mark removes
     // that option, and quarantine is the only restorable alternative - so it
@@ -582,12 +623,17 @@ function actionBar() {
 function previewModal() {
   const pv = state.preview;
   const hasPurge = pv.groups.some(g => g.disposition === "purge");
+  const hasDehydrate = pv.groups.some(g => g.disposition === "dehydrate");
+  // Everything in this preview only releases cloud downloads. Saying
+  // "everything can be restored" would be true but misses the point: nothing
+  // is being removed at all, and the files stay visible in Explorer.
+  const onlyDehydrate = hasDehydrate && pv.groups.every(g => g.disposition === "dehydrate");
   return h`
     <div class="overlay" data-act="close-preview">
       <div class="modal">
         <div class="modal-head">
           <h3>${T("prev.title")}</h3>
-          <p>${hasPurge ? T("prev.irreversible") : T("prev.restorable")}</p>
+          <p>${hasPurge ? T("prev.irreversible") : onlyDehydrate ? T("prev.releaseNote") : T("prev.restorable")}</p>
         </div>
         <div class="modal-body">
           ${pv.groups.map(g => previewGroup(g, pv.items)).join("")}
@@ -604,7 +650,7 @@ function previewModal() {
           <button data-act="close-preview">${T("prev.cancel")}</button>
           <button class="${hasPurge ? "danger" : "primary"}" data-act="do-cleanup"
             ${pv.busy || (pv.needsRed && !pv.confirmed) ? "disabled" : ""}>
-            ${pv.busy ? T("prev.busy") : hasPurge ? T("prev.purgeBtn") : T("prev.quarantineBtn")}
+            ${pv.busy ? T("prev.busy") : hasPurge ? T("prev.purgeBtn") : onlyDehydrate ? T("prev.releaseBtn") : T("prev.quarantineBtn")}
           </button>
         </div>
       </div>
@@ -613,13 +659,16 @@ function previewModal() {
 
 function previewGroup(g, items) {
   const isPurge = g.disposition === "purge";
+  const label = g.disposition === "purge" ? T("prev.purge")
+    : g.disposition === "dehydrate" ? T("prev.dehydrate")
+    : T("prev.quarantine");
   const groupItems = items.filter(i => i.disposition === g.disposition);
   const shown = groupItems.slice(0, 8);
   const catText = Object.entries(g.categoryCounts).map(([k, v]) => `${v} ${esc(categoryLabel(k))}`).join(" · ");
   return h`
     <div class="pgroup ${isPurge ? "purge" : ""}">
       <h4>
-        ${isPurge ? T("prev.purge") : T("prev.quarantine")}
+        ${label}
         <span class="dim" style="font-weight:400">${T("col.items", { n: g.itemCount })}</span>
         <span class="spacer" style="flex:1"></span>
         <span class="dim" style="font-weight:400">${fmtBytes(g.onDiskBytes)}</span>

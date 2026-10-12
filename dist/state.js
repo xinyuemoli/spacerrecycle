@@ -36,6 +36,7 @@ const state = {
   marks: new Map(),         // normalized path -> "critical" | "high" | "normal" | "low"
   importanceFilter: "all",  // "all" | level, for the findings toolbar
   menu: null,               // { path, name, level, x, y } right-click menu anchor
+  onedrive: null,           // { available, roots } from the backend, null until asked
 };
 
 export { state };
@@ -189,6 +190,11 @@ export function clampDisposition(f, d) {
 }
 
 export function effectiveDisposition(f) {
+  // Cloud-backed content has exactly one meaningful action. Deleting a
+  // placeholder inside a sync root deletes the cloud file, and quarantining it
+  // would take it out of the sync folder entirely, so neither is offered -
+  // and the backend refuses both regardless of what is chosen here.
+  if (f.category === "cloud_placeholder") return "dehydrate";
   const o = state.overrides.get(f.id);
   if (o) return clampDisposition(f, o);
   if (state.batchDisposition === "purge" && f.category !== "temp_junk" && f.category !== "system_cache") return clampDisposition(f, "purge");
@@ -295,7 +301,7 @@ export function findingsInDir(dir) {
     (f.path.replace(/[\\/][^\\/]*$/, "") || f.path) === dir);
 }
 
-const RISK_DOT = { safe: "green", rebuildable: "blue", personal: "yellow", userdata: "red" };
+const RISK_DOT = { safe: "green", rebuildable: "blue", personal: "yellow", userdata: "red", cloud: "purple" };
 
 export { RISK_DOT };
 
@@ -330,7 +336,25 @@ export const actions = {
     // reached without ever opening it, and a badge that only appears after a
     // second visit would look like the save had failed.
     await actions.loadImportance();
+    await actions.loadOnedrive();
     render();
+  },
+
+  /**
+   * Whether OneDrive is present on this machine.
+   *
+   * Cheap enough to call on every overview load: the backend only reads
+   * environment variables and stats the result. The byte counts come from the
+   * scan, not from here.
+   */
+  async loadOnedrive() {
+    try {
+      state.onedrive = await invoke("onedrive_status");
+    } catch (_) {
+      // A machine without OneDrive is the normal case, not an error worth a
+      // toast. Hide the card and move on.
+      state.onedrive = { available: false, roots: [] };
+    }
   },
 
   /**
@@ -600,11 +624,25 @@ export const actions = {
       const report = await invoke("run_cleanup", { request });
       pv.busy = false;
       state.preview = null;
-      const done = report.purged.length + report.quarantined.length;
-      let msg = t(state.lang, "toast.cleanup", {
-        purged: report.purged.length,
-        quarantined: report.quarantined.length,
-      });
+      const released = (report.dehydrated || []).length;
+      const done = report.purged.length + report.quarantined.length + released;
+      // Only mention the destructive counts when something was actually
+      // destroyed. "Permanently deleted 0 items" in front of a release-only
+      // cleanup reads as if a deletion happened and is worth checking.
+      let msg = (report.purged.length || report.quarantined.length)
+        ? t(state.lang, "toast.cleanup", {
+            purged: report.purged.length,
+            quarantined: report.quarantined.length,
+          })
+        : t(state.lang, "toast.cleanupNone");
+      if (released) {
+        // Deliberately not folded into "cleaned": nothing was removed, and
+        // OneDrive finishes the dehydration in the background.
+        msg += t(state.lang, "toast.released", {
+          n: released,
+          size: fmtBytes(report.dehydrateRequestedBytes || 0),
+        });
+      }
       if (report.blocked.length) msg += t(state.lang, "toast.blocked", { n: report.blocked.length });
       if (report.failed.length) msg += t(state.lang, "toast.failed", { n: report.failed.length });
       toast(msg, done ? "ok" : "err");
@@ -613,8 +651,11 @@ export const actions = {
       if (report.needsElevation) {
         state.elevateRequest = request;
       }
-      // Drop cleaned items from the list.
-      const cleaned = new Set([...report.purged, ...report.quarantined]);
+      // Drop cleaned items from the list. Released cloud findings go too: the
+      // folder is still there, but the row's byte count is now stale until the
+      // next scan, and a row that claims space it no longer holds is worse
+      // than no row.
+      const cleaned = new Set([...report.purged, ...report.quarantined, ...(report.dehydrated || [])]);
       state.findings = state.findings.filter(f => !cleaned.has(f.path));
       state.selected.clear();
       // The drill-down is derived from state.findings; a stale openDir would
@@ -649,7 +690,9 @@ export const actions = {
     lines.push(t(lang, "exp.generated", { time: new Date().toLocaleString() }));
     lines.push("");
     for (const g of pv.groups) {
-      const label = g.disposition === "purge" ? t(lang, "exp.purge") : t(lang, "exp.quarantine");
+      const label = g.disposition === "purge" ? t(lang, "exp.purge")
+        : g.disposition === "dehydrate" ? t(lang, "exp.dehydrate")
+        : t(lang, "exp.quarantine");
       lines.push(t(lang, "exp.group", { label, count: g.itemCount, size: fmtBytes(g.onDiskBytes) }));
       const items = pv.items.filter(i => i.disposition === g.disposition);
       for (const it of items) {

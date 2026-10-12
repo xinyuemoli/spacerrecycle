@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod cloud;
 pub mod dev;
 pub mod largefile;
 pub mod leftover;
@@ -82,6 +83,12 @@ pub fn run_all(ctx: &ScanCtx, enabled: &[Category]) -> Vec<Finding> {
         (
             Category::AppLeftover,
             Box::new(leftover::LeftoverScanner) as Box<dyn Scanner + Send + Sync>,
+        ),
+        (
+            // Opt-in like the large-file pass: walking an OneDrive root can
+            // take minutes, and it only makes sense on a machine that has one.
+            Category::CloudPlaceholder,
+            Box::new(cloud::CloudScanner) as Box<dyn Scanner + Send + Sync>,
         ),
     ];
 

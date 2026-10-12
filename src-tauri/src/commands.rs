@@ -428,6 +428,16 @@ pub fn audit_log_path() -> Option<String> {
     crate::log::log_path().map(|p| p.to_string_lossy().to_string())
 }
 
+/// Whether OneDrive is present, and where its sync roots are.
+///
+/// Cheap by design: it reads environment variables and stats the result, so
+/// the overview card can ask on every load without walking a tree that may
+/// hold hundreds of thousands of files. The byte counts come from the scan.
+#[tauri::command]
+pub async fn onedrive_status() -> crate::cloud::onedrive::Status {
+    offload(crate::cloud::onedrive::status).await
+}
+
 /// Every importance mark the user has set, most important first.
 ///
 /// The UI keeps this as a path-keyed map and stamps it onto rendered rows, so

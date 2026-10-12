@@ -21,6 +21,9 @@ pub enum Action {
     Restore,
     PurgeBatch,
     CancelScan,
+    /// Released a cloud-backed file's local copy. Nothing was destroyed: the
+    /// file stays in OneDrive and re-downloads on access.
+    Dehydrate,
 }
 
 impl Action {
@@ -31,6 +34,7 @@ impl Action {
             Action::Restore => "还原",
             Action::PurgeBatch => "彻底清除隔离批次",
             Action::CancelScan => "取消扫描",
+            Action::Dehydrate => "释放本地副本",
         }
     }
 }
@@ -101,6 +105,7 @@ pub fn record_disposition(d: Disposition, path: &str, bytes: u64, ok: bool) {
     let action = match d {
         Disposition::Purge => Action::Purge,
         Disposition::Quarantine => Action::Quarantine,
+        Disposition::Dehydrate => Action::Dehydrate,
     };
     record(
         action,
