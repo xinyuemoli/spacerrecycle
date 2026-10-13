@@ -1,13 +1,23 @@
 # SpaceRecycle Shell Extension
 
-Explorer integration: a right-click submenu that tags files and folders with an
-importance level.
+Explorer integration in two parts:
+
+1. A right-click submenu that tags files and folders with an importance level.
+2. An icon overlay that marks tagged files in place, with a different badge per
+   level.
 
 ```
 SpaceRecycle ▸  重要       (orange)   cleanup may quarantine or back it up, never delete
                 可清理     (green)    cleanup may delete it permanently
                 清除标记   (grey)     remove the mark
 ```
+
+Tagged files then carry one of these in the corner of their icon:
+
+| Level | Badge |
+|---|---|
+| 重要 | orange ring |
+| 可清理 | green check |
 
 The chosen level is written into an **Alternate Data Stream on the file itself**:
 
@@ -106,10 +116,18 @@ which announce themselves clearly:
 |---|---|
 | `$PSScriptRoot`, `$PSCommandPath` are 3.0+ | script dies resolving its own directory |
 | `Get-CimInstance` is 3.0+ | command not found; `Get-WmiObject` is the fallback |
+| `Get-ChildItem -File` is 3.0+ | listing silently comes back empty, which reads as "the files were never created" |
+| `Get-Content "<file>:<stream>"` is 3.0+ | reading an ADS by path fails, so a guard reports every marked file as unmarked — the marks were fine |
 | `Set-Content -NoNewline` is 5.0+ | parameter binding fails, **the fixture file is never created** — which then looks exactly like the shell item API rejecting a valid path |
 | `Start-Process -Wait` is broken on 2.0 | throws "the process is not currently running" as soon as a short-lived program exits, with or without `-PassThru` |
 | No .NET 4.0 (CLR 2.0.50727) | `[Environment]::Is64BitOperatingSystem` returns `$null` instead of throwing, so a try/catch guard silently reports a 64-bit guest as 32-bit |
-| `cmd`/`vmrun` append a stray whitespace argument | PowerShell 2.0 binds it to the first positional parameter, overriding the default — a `param` block is not safe in a guest-invoked script |
+| `vmrun` appends a stray whitespace argument, and 2.0 binds it positionally | a `param` block is not safe in a guest-invoked script; and strict parsers reject the command line outright |
+
+That last one deserves emphasis, because it is invisible until it bites:
+`tasklist`, `reg`, `whoami` and `shutdown` all fail with **"invalid
+argument/option - ' '"** and exit non-zero, while `menutest` ignores the extra
+token and works. The rule that follows from it: **run a script file, never an
+inline command.** `vm/*.cmd` and `vm/*.ps1` exist for exactly this reason.
 
 `register.ps1` therefore calls the DLL's `DllRegisterServer` **in-process**
 instead of shelling out to `regsvr32`, and carries a
@@ -137,6 +155,13 @@ So `menutest` falls back to loading the DLL and calling `DllGetClassObject`
 itself. That is not a workaround for a product bug: the same registration works
 through COM on the host, where the user is logged in normally.
 
+**The overlay handlers do not need that fallback.** They are registered under
+HKLM, and `HKLM\Software\Classes` *does* merge into HKCR in a guest-operations
+session - it is only the `HKCU` merge that is missing. In the VM the overlay
+objects are created straight through `CoCreateInstance`, and the log says so:
+`created via: COM registration`. The menu, registered per-user, still uses the
+direct load.
+
 ## Overlay slots on the VM
 
 The Windows 7 guest has **2** overlay handlers registered
@@ -144,7 +169,60 @@ The Windows 7 guest has **2** overlay handlers registered
 the fifteen slots are free**, which is exactly why overlay development belongs
 there and not on a working desktop.
 
-# Icon overlays: what was measured, and why the obvious design does not work
+# Icon overlays
+
+Two handlers, one per level, in the same DLL:
+
+| CLSID | Level | Badge | Priority |
+|---|---|---|---|
+| `...9B0D` | 重要 | `icons/important.ico` | 0 |
+| `...9B0E` | 可清理 | `icons/disposable.ico` | 1 |
+
+`IsMemberOf` is the hot path - Explorer calls it once per item it draws, on its
+UI thread - so the common answer costs one call:
+
+```cpp
+if (GetFileAttributesW("<path>:SpaceRecycle.Importance") == INVALID_FILE_ATTRIBUTES)
+    return S_FALSE;               // unmarked: one syscall, no handle, no parse
+return ReadLevel(path) == token ? S_OK : S_FALSE;   // marked: one read on top
+```
+
+The existence test runs first deliberately. `GetFileAttributesW` against a
+stream path needs no handle and no read, so a folder full of unmarked files -
+the overwhelmingly common case - pays a single syscall each.
+
+Handlers are registered under **HKLM** only: Windows reads overlays from
+`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers`
+and has no per-user equivalent, unlike the context menu. `DllRegisterServer`
+therefore returns **S_FALSE** when the menu registered but the overlays did not,
+so an unelevated install reports a partial result instead of a success that did
+not happen.
+
+The registry key names carry 13 leading spaces; see "How to place a handler
+inside the 15" below for why that number is load-bearing.
+
+## Verified on Windows 7 SP1 x64
+
+![overlay badges on a Windows 7 desktop](vm/evidence/win7-overlay-icons.png)
+
+Six files on the guest desktop: two tagged 重要, two tagged 可清理, two
+untagged. Explorer loaded the DLL (`tasklist /m SpaceRecycleShell.dll` reports it
+inside `explorer.exe`) and drew the matching badge on the tagged files and
+nothing on the untagged ones. The full screenshot is
+`vm/evidence/win7-overlay-verified.png`.
+
+That is the end-to-end proof, and it is the only kind available: an overlay
+handler is told about paths and never learns what was drawn, so it cannot report
+whether Explorer used it. The alternatives would have been a screenshot or
+nothing.
+
+Note that the guest's console session had to be restarted for Explorer to
+re-read the handler list. Killing `explorer.exe` did **not** bring it back even
+with `AutoRestartShell=1`, which left the session with no shell; a reboot fixed
+it, and the auto-logon account returned it to the
+desktop unattended. Reboot, don't taskkill.
+
+# Icon overlays: what was measured, and why the obvious design cannot work
 
 The natural reading of `IShellIconOverlayIdentifier` is "the handler returns an
 icon, so it can return a different one per level". **It cannot.** This was
@@ -213,10 +291,12 @@ two slots, pushing out two Tortoise state icons.
 The plan is therefore:
 
 1. Ship the context menu on its own (done — HKCU, zero footprint).
-2. Do overlay development and testing **in a VM**, where displacing entries
-   costs nothing.
-3. At install time, compute whether the entry would land inside the 15 and say
-   so, rather than registering a handler that will never run.
+2. Develop and test the overlays **in a VM** (done — the guest has 13 free
+   slots, so nothing had to be displaced to prove the design).
+3. Before installing on a real machine, compute whether the entries would land
+   inside the 15 and say so, rather than registering handlers that will never
+   run. `register.ps1 -Action status` already reports the resulting position and
+   flags it when it falls outside the honoured range.
 
 The probe under `probe/` is kept because it is the instrument that produced
 these numbers; re-run it on any new Windows build before trusting the layout.

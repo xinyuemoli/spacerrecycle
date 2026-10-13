@@ -39,6 +39,19 @@ namespace {
 const CLSID CLSID_SpaceRecycleShell =
     {0x7a5e3c21, 0x9b4d, 0x4e8f, {0xa6, 0xc2, 0x1d, 0x3e, 0x5f, 0x7a, 0x9b, 0x0c}};
 
+// One overlay CLSID per level. Explorer instantiates a handler per registered
+// entry and asks it whether it applies to each file, so a distinct icon per
+// level means a distinct handler per level - there is no way to vary the icon
+// from within a single handler, because GetOverlayInfo is called once per
+// process at load time and never receives a file path.
+//
+// {7A5E3C21-9B4D-4E8F-A6C2-1D3E5F7A9B0D}
+const CLSID CLSID_OverlayImportant =
+    {0x7a5e3c21, 0x9b4d, 0x4e8f, {0xa6, 0xc2, 0x1d, 0x3e, 0x5f, 0x7a, 0x9b, 0x0d}};
+// {7A5E3C21-9B4D-4E8F-A6C2-1D3E5F7A9B0E}
+const CLSID CLSID_OverlayDisposable =
+    {0x7a5e3c21, 0x9b4d, 0x4e8f, {0xa6, 0xc2, 0x1d, 0x3e, 0x5f, 0x7a, 0x9b, 0x0e}};
+
 // Stable per-command GUIDs. Explorer caches by these, so they must never
 // change once shipped.
 const GUID kCanonicalImportant =
@@ -582,11 +595,108 @@ IEnumExplorerCommand* CreateSubCommandEnumerator() {
     return SUCCEEDED(hr) ? out : nullptr;
 }
 
+// ----------------------------------------------------------- icon overlays
+
+/// Reports whether a path carries one particular importance level.
+///
+/// Explorer calls IsMemberOf once for every item it draws, on its UI thread, so
+/// this is the hottest path in the extension and it has to stay cheap. The
+/// common case - an unmarked file - costs exactly one GetFileAttributesW
+/// against the stream path: no stream, nothing to open, nothing to parse. A
+/// file that is actually marked pays for one read on top of that, and a marked
+/// file of the *other* level pays the same, which is unavoidable when each
+/// level is a separate handler.
+class OverlayHandler final : public IShellIconOverlayIdentifier {
+public:
+    explicit OverlayHandler(Kind kind) : m_ref(1), m_kind(kind) {
+        const LevelDef* def = (kind == Kind::Clear) ? nullptr : FindLevel(kind);
+        if (def != nullptr) {
+            m_token = def->token;
+            m_iconFile = def->ico;
+        }
+    }
+
+    // ---- IUnknown ----
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (ppv == nullptr) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (IsEqualIID(riid, IID_IUnknown) ||
+            IsEqualIID(riid, IID_IShellIconOverlayIdentifier)) {
+            *ppv = static_cast<IShellIconOverlayIdentifier*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return (ULONG)InterlockedIncrement(&m_ref); }
+    STDMETHODIMP_(ULONG) Release() override {
+        LONG n = InterlockedDecrement(&m_ref);
+        if (n == 0) {
+            delete this;
+        }
+        return (ULONG)n;
+    }
+
+    // ---- IShellIconOverlayIdentifier ----
+
+    STDMETHODIMP IsMemberOf(LPCWSTR pwszPath, DWORD) override {
+        if (pwszPath == nullptr || m_token.empty()) {
+            return S_FALSE;
+        }
+        std::wstring stream = StreamPath(pwszPath);
+        // Existence first. GetFileAttributesW on a stream path is one call and
+        // needs no handle, so the overwhelmingly common "this file is not
+        // marked at all" answer costs a single syscall.
+        if (GetFileAttributesW(stream.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            return S_FALSE;
+        }
+        return ReadLevel(pwszPath) == m_token ? S_OK : S_FALSE;
+    }
+
+    STDMETHODIMP GetOverlayInfo(LPWSTR pwszIconFile, int cchMax, int* pIndex,
+                               DWORD* pdwFlags) override {
+        if (pwszIconFile == nullptr || pIndex == nullptr || pdwFlags == nullptr) {
+            return E_POINTER;
+        }
+        if (cchMax <= 0) {
+            return E_INVALIDARG;
+        }
+        std::wstring icon = IconPath(m_iconFile.c_str());
+        if (icon.empty()) {
+            return E_FAIL;
+        }
+        wcsncpy_s(pwszIconFile, (size_t)cchMax, icon.c_str(), _TRUNCATE);
+        *pIndex = 0;
+        *pdwFlags = ISIOI_ICONFILE | ISIOI_ICONINDEX;
+        return S_OK;
+    }
+
+    STDMETHODIMP GetPriority(int* pPriority) override {
+        if (pPriority == nullptr) {
+            return E_POINTER;
+        }
+        // Lower number wins. Only one overlay is drawn per item, so this only
+        // decides what happens if a file somehow carries both marks - and then
+        // the more cautious badge is the one worth showing.
+        *pPriority = (m_kind == Kind::Important) ? 0 : 1;
+        return S_OK;
+    }
+
+private:
+    ~OverlayHandler() = default;
+    LONG m_ref;
+    Kind m_kind;
+    std::wstring m_token;
+    std::wstring m_iconFile;
+};
+
 // ------------------------------------------------------------- class factory
 
 class ShellFactory final : public IClassFactory {
 public:
-    ShellFactory() : m_ref(1) {}
+    explicit ShellFactory(REFCLSID clsid) : m_ref(1), m_clsid(clsid) {}
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (ppv == nullptr) {
@@ -617,12 +727,24 @@ public:
         if (outer != nullptr) {
             return CLASS_E_NOAGGREGATION;
         }
-        SpaceRecycleCommand* c = new (std::nothrow) SpaceRecycleCommand(Kind::Root);
-        if (c == nullptr) {
+
+        // One factory serves every class in the DLL; which object to build is
+        // decided by the CLSID the factory was created for.
+        IUnknown* created = nullptr;
+        if (IsEqualCLSID(m_clsid, CLSID_SpaceRecycleShell)) {
+            created = new (std::nothrow) SpaceRecycleCommand(Kind::Root);
+        } else if (IsEqualCLSID(m_clsid, CLSID_OverlayImportant)) {
+            created = new (std::nothrow) OverlayHandler(Kind::Important);
+        } else if (IsEqualCLSID(m_clsid, CLSID_OverlayDisposable)) {
+            created = new (std::nothrow) OverlayHandler(Kind::Disposable);
+        } else {
+            return CLASS_E_CLASSNOTAVAILABLE;
+        }
+        if (created == nullptr) {
             return E_OUTOFMEMORY;
         }
-        HRESULT hr = c->QueryInterface(riid, ppv);
-        c->Release();
+        HRESULT hr = created->QueryInterface(riid, ppv);
+        created->Release();
         return hr;
     }
 
@@ -634,9 +756,81 @@ public:
 private:
     ~ShellFactory() = default;
     LONG m_ref;
+    CLSID m_clsid;
 };
 
 // ------------------------------------------------------------- registration
+
+// Declared before use: the overlay registration below needs them, and they are
+// defined at the end of this namespace.
+bool SetKeyValue(HKEY root, const std::wstring& subkey, const wchar_t* name,
+                 const std::wstring& value);
+bool DeleteKeyTree(HKEY root, const std::wstring& subkey);
+std::wstring GuidToString(REFGUID g);
+
+/// 13 leading spaces, and that number is not decoration.
+///
+/// Explorer keeps only the first 15 entries under ShellIconOverlayIdentifiers,
+/// ordered by a character-by-character comparison of the key NAME. A space
+/// sorts below every letter, so at the first position where two names differ
+/// the one holding a space wins - meaning more leading spaces means a better
+/// slot. OneDrive uses 13 spaces and owns seven slots on a machine with 35
+/// entries registered. Matching that, and starting the real name with "S",
+/// places these after OneDrive's entries and before Tortoise's.
+const wchar_t* kOverlayNamePrefix = L"             ";
+
+const wchar_t* kOverlayKey =
+    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers\\";
+
+struct OverlayRegistration {
+    const CLSID* clsid;
+    const wchar_t* name;        // without the leading spaces
+    const wchar_t* description;
+};
+
+const OverlayRegistration kOverlays[] = {
+    {&CLSID_OverlayImportant, L"SpaceRecycleImportant",
+     L"SpaceRecycle overlay: important"},
+    {&CLSID_OverlayDisposable, L"SpaceRecycleDisposable",
+     L"SpaceRecycle overlay: disposable"},
+};
+constexpr int kOverlayCount = (int)(sizeof(kOverlays) / sizeof(kOverlays[0]));
+
+/// Registers the two overlay handlers under HKLM.
+///
+/// Returns true only if every key was written. Overlays have no per-user
+/// equivalent - Windows reads them from HKLM alone - so this needs an elevated
+/// caller, and a failure here is a real, reportable condition rather than
+/// something to swallow.
+bool RegisterOverlays(const std::wstring& dllPath) {
+    bool allOk = true;
+    for (int i = 0; i < kOverlayCount; ++i) {
+        const std::wstring clsid = GuidToString(*kOverlays[i].clsid);
+        const std::wstring clsidKey = L"SOFTWARE\\Classes\\CLSID\\" + clsid;
+        bool ok = SetKeyValue(HKEY_LOCAL_MACHINE, clsidKey, nullptr,
+                              kOverlays[i].description) &&
+                  SetKeyValue(HKEY_LOCAL_MACHINE, clsidKey + L"\\InprocServer32", nullptr,
+                              dllPath) &&
+                  SetKeyValue(HKEY_LOCAL_MACHINE, clsidKey + L"\\InprocServer32",
+                              L"ThreadingModel", L"Apartment");
+        const std::wstring overlayKey =
+            std::wstring(kOverlayKey) + kOverlayNamePrefix + kOverlays[i].name;
+        ok = ok && SetKeyValue(HKEY_LOCAL_MACHINE, overlayKey, nullptr, clsid);
+        if (!ok) {
+            allOk = false;
+        }
+    }
+    return allOk;
+}
+
+void UnregisterOverlays() {
+    for (int i = 0; i < kOverlayCount; ++i) {
+        const std::wstring clsid = GuidToString(*kOverlays[i].clsid);
+        DeleteKeyTree(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\CLSID\\" + clsid);
+        DeleteKeyTree(HKEY_LOCAL_MACHINE,
+                      std::wstring(kOverlayKey) + kOverlayNamePrefix + kOverlays[i].name);
+    }
+}
 
 /// Write one registry string value, creating the key path as needed.
 bool SetKeyValue(HKEY root, const std::wstring& subkey, const wchar_t* name,
@@ -681,10 +875,12 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
         return E_POINTER;
     }
     *ppv = nullptr;
-    if (!IsEqualCLSID(rclsid, CLSID_SpaceRecycleShell)) {
+    if (!IsEqualCLSID(rclsid, CLSID_SpaceRecycleShell) &&
+        !IsEqualCLSID(rclsid, CLSID_OverlayImportant) &&
+        !IsEqualCLSID(rclsid, CLSID_OverlayDisposable)) {
         return CLASS_E_CLASSNOTAVAILABLE;
     }
-    ShellFactory* f = new (std::nothrow) ShellFactory();
+    ShellFactory* f = new (std::nothrow) ShellFactory(rclsid);
     if (f == nullptr) {
         return E_OUTOFMEMORY;
     }
@@ -737,6 +933,14 @@ STDAPI DllRegisterServer() {
             return E_FAIL;
         }
     }
+
+    // Overlays need HKLM, so they can legitimately fail on an unelevated
+    // install. S_FALSE says "the menu is registered, the overlays are not" -
+    // which is a state the caller can act on, and is honest about a partial
+    // result rather than reporting a success that did not happen.
+    if (!RegisterOverlays(dll)) {
+        return S_FALSE;
+    }
     return S_OK;
 }
 
@@ -750,5 +954,7 @@ STDAPI DllUnregisterServer() {
         _snwprintf_s(buf, _countof(buf), _TRUNCATE, kVerbKey, classes[i]);
         DeleteKeyTree(HKEY_CURRENT_USER, buf);
     }
+
+    UnregisterOverlays();
     return S_OK;
 }
