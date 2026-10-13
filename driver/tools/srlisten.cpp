@@ -54,6 +54,7 @@ typedef struct _SR_REPLY_MESSAGE {
 
 static HANDLE gLog = INVALID_HANDLE_VALUE;
 static DWORD gRunSeconds = 0;
+static BOOL gDenyAll = FALSE;
 
 // The driver reports what FltGetFileNameInformation hands back for a normalized
 // name, which is a device path: \Device\HarddiskVolume1\folder\file. Anything
@@ -126,6 +127,11 @@ int wmain(int argc, wchar_t** argv) {
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"-seconds") == 0 && i + 1 < argc) {
             gRunSeconds = (DWORD)_wtoi(argv[++i]);
+        } else if (wcscmp(argv[i], L"-deny") == 0) {
+            // Refuse everything. This exists to test the driver's denial path on
+            // its own: if a delete is still not blocked when the filter is told
+            // to refuse it, the fault is in the driver, not in the policy.
+            gDenyAll = TRUE;
         } else if (argv[i][0] != L'-') {
             logPath = argv[i];
         }
@@ -205,7 +211,7 @@ int wmain(int argc, wchar_t** argv) {
         SR_REPLY_MESSAGE reply;
         ZeroMemory(&reply, sizeof(reply));
         reply.Header.MessageId = message.Header.MessageId;
-        reply.Payload.Allow = TRUE;      // milestone 1: observe only
+        reply.Payload.Allow = gDenyAll ? FALSE : TRUE;
 
         // The filter manager wants the reply size to match what the filter
         // declared exactly. Passing sizeof(SR_REPLY_MESSAGE) does not: the

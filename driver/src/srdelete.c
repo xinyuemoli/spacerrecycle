@@ -75,10 +75,22 @@ static NTSTATUS SRConnect(PFLT_PORT ClientPort, PVOID ServerPortCookie,
     UNREFERENCED_PARAMETER(SizeOfContext);
     UNREFERENCED_PARAMETER(ConnectionPortCookie);
 
-    /* One listener at a time. A second connection would be another process
-     * claiming authority over deletions, and there is no reason to allow it. */
+    /* A new connection replaces the old one rather than being refused.
+     *
+     * The first version returned STATUS_CONNECTION_COUNT_LIMIT while a client
+     * was attached. That looked like a sensible guard and was in fact a way for
+     * the protection to disappear: when the guard service was killed and
+     * restarted, its client port had not been released, so the replacement
+     * could not connect at all and got ERROR_CONNECTION_COUNT_LIMIT
+     * (0x800704D6). With no client attached, every delete then failed open, and
+     * fail-open is silent by design.
+     *
+     * The port's security descriptor already limits who may connect, so taking
+     * over from a stale client costs nothing and cannot be done by an
+     * unprivileged process. */
     if (gClientPort != NULL) {
-        return STATUS_CONNECTION_COUNT_LIMIT;
+        FltCloseClientPort(gFilter, &gClientPort);
+        gClientPort = NULL;
     }
     gClientPort = ClientPort;
     return STATUS_SUCCESS;

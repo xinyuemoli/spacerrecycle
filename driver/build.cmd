@@ -51,5 +51,15 @@ cl /nologo /MT /O2 /EHsc /W3 /DUNICODE /D_UNICODE ^
 if errorlevel 1 exit /b 1
 
 echo.
+echo === building srguard.exe (policy + service) ===
+cl /nologo /MT /O2 /EHsc /W3 /DUNICODE /D_UNICODE ^
+   /I"%KIT%\Include\%VER%\um" ^
+   /I"%KIT%\Include\%VER%\shared" ^
+   tools\srguard.cpp ^
+   /link /LIBPATH:"%KIT%\Lib\%VER%\um\x64" /OUT:bin\srguard.exe ^
+   fltLib.lib wtsapi32.lib advapi32.lib user32.lib
+if errorlevel 1 exit /b 1
+
+echo.
 echo BUILT:
 dir /b bin
