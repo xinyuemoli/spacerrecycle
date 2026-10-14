@@ -36,6 +36,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <string>
 #include <new>
 
@@ -66,12 +67,45 @@ typedef struct _SR_REPLY_MESSAGE {
     SR_REPLY Payload;
 } SR_REPLY_MESSAGE, *PSR_REPLY_MESSAGE;
 
+/* Must match the driver's definitions exactly. */
+#define SR_ACTION_ASK   0
+#define SR_ACTION_DENY  1
+#define SR_ACTION_ALLOW 2
+#define SR_CMD_SET_POLICY 1
+#define SR_CMD_GET_POLICY 2
+
+typedef struct _SR_POLICY {
+    ULONG Size;
+    ULONG Version;
+    ULONG ActionForMarked;
+    ULONG ActionForUnmarked;
+    ULONG CheckMark;
+} SR_POLICY, *PSR_POLICY;
+
+/* Must match the driver's SR_STATUS. The counters are how a driver with no
+ * console reports what its decision path is actually doing. */
+typedef struct _SR_STATUS {
+    SR_POLICY Policy;
+    ULONG MarkChecked;
+    ULONG MarkYes;
+    ULONG MarkNo;
+    ULONG Decisions;
+    ULONG Escalated;
+    ULONG LastMarkStatus;
+    ULONG Connects;
+    ULONG Disconnects;
+    ULONG PortReplaced;
+} SR_STATUS, *PSR_STATUS;
+
 static HANDLE gLog = INVALID_HANDLE_VALUE;
 static SERVICE_STATUS gStatus = {0};
 static SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 static HANDLE gStopEvent = nullptr;
 static HANDLE gPort = INVALID_HANDLE_VALUE;
 static bool gNoPrompt = false;
+static std::wstring gPolicyPath;
+static volatile LONG gPolicyPushCount = 0;
+static DWORD gGuardThreadId = 0;
 
 /* ------------------------------------------------------------------ logging */
 
@@ -106,13 +140,16 @@ static void OpenLog() {
     wchar_t dir[MAX_PATH] = {0};
     DWORD n = GetEnvironmentVariableW(L"ProgramData", dir, _countof(dir));
     std::wstring path;
+    std::wstring base;
     if (n > 0 && n < _countof(dir)) {
-        path.assign(dir);
-        path += L"\\SpaceRecycle";
-        CreateDirectoryW(path.c_str(), nullptr);
-        path += L"\\guard.log";
+        base.assign(dir);
+        base += L"\\SpaceRecycle";
+        CreateDirectoryW(base.c_str(), nullptr);
+        path = base + L"\\guard.log";
+        gPolicyPath = base + L"\\policy.ini";
     } else {
         path = L"srguard.log";
+        gPolicyPath = L"policy.ini";
     }
     gLog = CreateFileW(path.c_str(), FILE_APPEND_DATA,
                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -284,30 +321,231 @@ static void DeleteWithMarkRemoved(const std::wstring& dosPath) {
     }
 }
 
+/* ------------------------------------------------------------------ policy */
+
+static const char* ActionName(ULONG action) {
+    switch (action) {
+    case SR_ACTION_ASK:   return "ask";
+    case SR_ACTION_DENY:  return "deny";
+    case SR_ACTION_ALLOW: return "allow";
+    default:              return "?";
+    }
+}
+
+static bool ParseAction(const std::string& value, ULONG* out) {
+    if (value == "ask")   { *out = SR_ACTION_ASK;   return true; }
+    if (value == "deny")  { *out = SR_ACTION_DENY;  return true; }
+    if (value == "allow") { *out = SR_ACTION_ALLOW; return true; }
+    return false;
+}
+
+/// Reads the settings file. Absent or unreadable is not an error: it is the
+/// state before anyone has configured anything, and the built-in defaults apply.
+///
+/// A flat key=value file rather than JSON on purpose - the service would need a
+/// parser to read two integers, and that parser would be more code than the
+/// feature it feeds. When the settings screen arrives it can write this format
+/// directly, or talk to the service over a pipe and skip the file entirely.
+///
+///   action_marked=ask|deny|allow
+///   action_unmarked=allow|deny|ask
+///   check_mark=1|0
+static void LoadPolicyFile(SR_POLICY* policy) {
+    HANDLE h = CreateFileW(gPolicyPath.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    char buffer[512] = {0};
+    DWORD read = 0;
+    ReadFile(h, buffer, sizeof(buffer) - 1, &read, nullptr);
+    CloseHandle(h);
+    buffer[read] = '\0';
+
+    char* context = nullptr;
+    for (char* line = strtok_s(buffer, "\r\n", &context); line != nullptr;
+         line = strtok_s(nullptr, "\r\n", &context)) {
+        while (*line == ' ' || *line == '\t') {
+            ++line;
+        }
+        if (*line == '\0' || *line == '#' || *line == ';') {
+            continue;
+        }
+        char* equals = strchr(line, '=');
+        if (equals == nullptr) {
+            continue;
+        }
+        *equals = '\0';
+        std::string key(line);
+        std::string value(equals + 1);
+        while (!value.empty() && (value[value.size() - 1] == ' ' || value[value.size() - 1] == '\t')) {
+            value.erase(value.size() - 1);
+        }
+        while (!key.empty() && (key[key.size() - 1] == ' ' || key[key.size() - 1] == '\t')) {
+            key.erase(key.size() - 1);
+        }
+
+        if (key == "action_marked") {
+            if (!ParseAction(value, &policy->ActionForMarked)) {
+                Log("policy: unknown action_marked '%s' (ignored)", value.c_str());
+            }
+        } else if (key == "action_unmarked") {
+            if (!ParseAction(value, &policy->ActionForUnmarked)) {
+                Log("policy: unknown action_unmarked '%s' (ignored)", value.c_str());
+            }
+        } else if (key == "check_mark") {
+            policy->CheckMark = (value == "0") ? 0 : 1;
+        } else {
+            Log("policy: unknown key '%s' (ignored)", key.c_str());
+        }
+    }
+}
+
+/// Sends the policy and checks what came back.
+///
+/// The push answers with the applied policy and the driver's counters, so one
+/// call both applies and verifies. FilterSendMessage succeeding only means the
+/// message was delivered; without the echo, a driver that rejected the structure
+/// would look exactly like a successful push and the settings screen would
+/// report a change that never took effect.
+static bool PushPolicy(const SR_POLICY& policy) {
+    if (gPort == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    unsigned char inBuffer[sizeof(ULONG) + sizeof(SR_POLICY)];
+    ULONG command = SR_CMD_SET_POLICY;
+    memcpy(inBuffer, &command, sizeof(command));
+    memcpy(inBuffer + sizeof(command), &policy, sizeof(policy));
+
+    SR_STATUS status;
+    ZeroMemory(&status, sizeof(status));
+    DWORD returned = 0;
+    HRESULT hr = FilterSendMessage(gPort, inBuffer, (DWORD)sizeof(inBuffer),
+                                   &status, sizeof(status), &returned);
+    if (FAILED(hr)) {
+        Log("policy push rejected: hr=0x%08lX", (unsigned long)hr);
+        return false;
+    }
+    if (returned < sizeof(SR_STATUS)) {
+        Log("policy push returned %lu bytes, expected %lu",
+            (unsigned long)returned, (unsigned long)sizeof(SR_STATUS));
+        return false;
+    }
+    if (memcmp(&status.Policy, &policy, sizeof(SR_POLICY)) != 0) {
+        Log("policy MISMATCH: asked marked=%s unmarked=%s, driver holds marked=%s unmarked=%s",
+            ActionName(policy.ActionForMarked), ActionName(policy.ActionForUnmarked),
+            ActionName(status.Policy.ActionForMarked), ActionName(status.Policy.ActionForUnmarked));
+        return false;
+    }
+
+    InterlockedIncrement(&gPolicyPushCount);
+    Log("policy applied: marked=%s unmarked=%s check_mark=%lu",
+        ActionName(policy.ActionForMarked), ActionName(policy.ActionForUnmarked),
+        (unsigned long)policy.CheckMark);
+    Log("  driver counters: decisions=%lu escalated=%lu  mark_checked=%lu yes=%lu no=%lu  last_mark_status=0x%08lX",
+        (unsigned long)status.Decisions, (unsigned long)status.Escalated,
+        (unsigned long)status.MarkChecked, (unsigned long)status.MarkYes,
+        (unsigned long)status.MarkNo, (unsigned long)status.LastMarkStatus);
+    Log("  driver port: connects=%lu disconnects=%lu replaced=%lu",
+        (unsigned long)status.Connects, (unsigned long)status.Disconnects,
+        (unsigned long)status.PortReplaced);
+    return true;
+}
+
+/// Watches the settings file and re-pushes when it changes.
+///
+/// This is what makes the disposition changeable while the driver keeps running:
+/// nothing here reloads a driver or restarts a service, it just sends a new
+/// structure down the port that was already open. An edited file takes effect
+/// within a couple of seconds.
+static DWORD WINAPI PolicyWatcher(LPVOID) {
+    SR_POLICY policy = {sizeof(SR_POLICY), 1, SR_ACTION_ASK, SR_ACTION_ALLOW, 1};
+    LoadPolicyFile(&policy);
+
+    FILETIME lastWrite = {0, 0};
+    WIN32_FILE_ATTRIBUTE_DATA attributes;
+    if (GetFileAttributesExW(gPolicyPath.c_str(), GetFileExInfoStandard, &attributes)) {
+        lastWrite = attributes.ftLastWriteTime;
+    }
+
+    for (;;) {
+        if (WaitForSingleObject(gStopEvent, 2000) == WAIT_OBJECT_0) {
+            break;
+        }
+        if (!GetFileAttributesExW(gPolicyPath.c_str(), GetFileExInfoStandard, &attributes)) {
+            continue;
+        }
+        if (CompareFileTime(&attributes.ftLastWriteTime, &lastWrite) == 0) {
+            continue;
+        }
+        lastWrite = attributes.ftLastWriteTime;
+
+        SR_POLICY updated = policy;
+        LoadPolicyFile(&updated);
+        if (memcmp(&updated, &policy, sizeof(SR_POLICY)) != 0) {
+            policy = updated;
+            PushPolicy(policy);
+        }
+    }
+    return 0;
+}
+
 /* --------------------------------------------------------------- main loop */
 
-static DWORD WINAPI GuardLoop(LPVOID) {
-    OpenLog();
-    Log("guard starting (pid %lu, prompt=%s)", GetCurrentProcessId(),
-        gNoPrompt ? "off" : "on");
-
+/// Attaches to the filter port, retrying while the driver is still starting.
+static bool ConnectToFilter() {
     HRESULT hr = E_FAIL;
     for (int attempt = 1; attempt <= 30; ++attempt) {
         hr = FilterConnectCommunicationPort(SR_PORT_NAME, 0, nullptr, 0, nullptr, &gPort);
         if (SUCCEEDED(hr)) {
-            break;
+            return true;
         }
         if (attempt == 1 || attempt % 5 == 0) {
             Log("connect attempt %d failed: hr=0x%08lX", attempt, (unsigned long)hr);
         }
         Sleep(1000);
     }
-    if (FAILED(hr)) {
-        Log("cannot reach the filter (hr=0x%08lX); guard idle", (unsigned long)hr);
+    Log("cannot reach the filter (hr=0x%08lX)", (unsigned long)hr);
+    return false;
+}
+
+static DWORD WINAPI GuardLoop(LPVOID) {
+    gGuardThreadId = GetCurrentThreadId();
+    OpenLog();
+    Log("guard starting (pid %lu, prompt=%s)", GetCurrentProcessId(),
+        gNoPrompt ? "off" : "on");
+
+    if (!ConnectToFilter()) {
+        Log("guard idle");
         return 1;
     }
     Log("connected to the filter");
 
+    /* Push the configured policy before starting the watcher, and do it on this
+     * thread. The first version let the watcher do it, which meant the very
+     * first FilterSendMessage ran at the same moment as the first
+     * FilterGetMessage on the same port handle - and the receive failed with
+     * E_FAIL, ending the loop and silently disabling the protection. Sending
+     * once here removes that overlap at startup; the watcher only sends when
+     * the settings file actually changes. */
+    {
+        SR_POLICY initial = {sizeof(SR_POLICY), 1, SR_ACTION_ASK, SR_ACTION_ALLOW, 1};
+        LoadPolicyFile(&initial);
+        PushPolicy(initial);
+    }
+
+    HANDLE watcher = CreateThread(nullptr, 0, PolicyWatcher, nullptr, 0, nullptr);
+    if (watcher != nullptr) {
+        CloseHandle(watcher);
+    } else {
+        Log("could not start the policy watcher (%lu); driver keeps its default",
+            GetLastError());
+    }
+
+    HRESULT hr = E_FAIL;
+    int receiveFailures = 0;
     for (;;) {
         if (WaitForSingleObject(gStopEvent, 0) == WAIT_OBJECT_0) {
             break;
@@ -317,9 +555,30 @@ static DWORD WINAPI GuardLoop(LPVOID) {
         ZeroMemory(&message, sizeof(message));
         hr = FilterGetMessage(gPort, &message.Header, sizeof(message), nullptr);
         if (FAILED(hr)) {
-            Log("FilterGetMessage failed: hr=0x%08lX", (unsigned long)hr);
-            break;
+            /* A failed receive used to end the loop, and ending the loop is the
+             * worst possible response: the driver keeps running and keeps
+             * asking, and with nobody answering every delete fails open. The
+             * protection disappears and the only trace is one line in a log.
+             * Reconnect instead, and give up only if the port cannot be
+             * re-established at all. */
+            Log("FilterGetMessage failed: hr=0x%08lX; reconnecting", (unsigned long)hr);
+            if (gPort != INVALID_HANDLE_VALUE) {
+                CloseHandle(gPort);
+                gPort = INVALID_HANDLE_VALUE;
+            }
+            if (++receiveFailures > 5) {
+                Log("giving up after %d consecutive receive failures", receiveFailures);
+                break;
+            }
+            Sleep(1000);
+            if (!ConnectToFilter()) {
+                Sleep(2000);
+                continue;
+            }
+            Log("reconnected to the filter");
+            continue;
         }
+        receiveFailures = 0;
 
         std::wstring dos;
         const bool mapped = DevicePathToDos(message.Payload.Path, dos);
@@ -380,10 +639,17 @@ static VOID WINAPI ServiceCtrlHandler(DWORD control) {
         if (gStopEvent != nullptr) {
             SetEvent(gStopEvent);
         }
-        if (gPort != INVALID_HANDLE_VALUE) {
-            // FilterGetMessage blocks; cancelling the handle wakes it so the
-            // service can reach a stopped state instead of hanging the SCM.
-            CancelSynchronousIo(GetCurrentThread());
+        /* FilterGetMessage blocks, and the guard loop is the only caller, so the
+         * SCM would otherwise wait out its timeout on every stop. Cancelling the
+         * call needs the *guard* thread, not the handler's own thread - passing
+         * GetCurrentThread() here cancels the wrong one and the stop appears to
+         * hang. */
+        if (gGuardThreadId != 0) {
+            HANDLE thread = OpenThread(THREAD_TERMINATE, FALSE, gGuardThreadId);
+            if (thread != nullptr) {
+                CancelSynchronousIo(thread);
+                CloseHandle(thread);
+            }
         }
     }
 }

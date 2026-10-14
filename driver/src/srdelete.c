@@ -61,9 +61,76 @@ typedef struct _SR_REPLY {
 #define SR_OP_DELETE 1
 #define SR_OP_DELETE_ON_CLOSE 2
 
+/* What to do about a delete. The driver is told this; it never derives it.
+ *
+ * Every *value* lives in user mode, so a settings screen can change the
+ * disposition without the driver being rebuilt or reloaded, and without the
+ * service being restarted. Only a new *kind* of action - something the driver
+ * cannot already express by allowing, refusing or asking - would need driver
+ * code. */
+#define SR_ACTION_ASK   0   /* escalate to user mode and let it decide */
+#define SR_ACTION_DENY  1   /* refuse here: no message, no round trip */
+#define SR_ACTION_ALLOW 2   /* permit here: no message, no round trip */
+
+#define SR_CMD_SET_POLICY 1
+#define SR_CMD_GET_POLICY 2
+
+typedef struct _SR_POLICY {
+    ULONG Size;               /* sizeof(SR_POLICY). A newer user-mode side
+                               * sending a bigger structure is rejected rather
+                               * than having its extra fields read as garbage. */
+    ULONG Version;
+    ULONG ActionForMarked;    /* SR_ACTION_* */
+    ULONG ActionForUnmarked;  /* SR_ACTION_* */
+    ULONG CheckMark;          /* 1 = test the ADS before escalating */
+} SR_POLICY, *PSR_POLICY;
+
+/* Echoed back with every policy push.
+ *
+ * The counters exist because a driver has no console: without them, "the check
+ * says unmarked" and "the check is never reached" and "the pushed policy says
+ * allow" all look identical from user mode - a delete that simply succeeds.
+ * Returning them alongside the applied policy makes the whole decision path
+ * observable in one call, which is what turned a silent misbehaviour into a
+ * specific bug twice during development. */
+typedef struct _SR_STATUS {
+    SR_POLICY Policy;
+    ULONG MarkChecked;
+    ULONG MarkYes;
+    ULONG MarkNo;
+    ULONG Decisions;
+    ULONG Escalated;
+    ULONG LastMarkStatus;   /* NTSTATUS from the last stream open */
+    ULONG Connects;         /* times a client attached */
+    ULONG Disconnects;      /* times a client detached */
+    ULONG PortReplaced;     /* times a new client displaced an old one */
+} SR_STATUS, *PSR_STATUS;
+
 static PFLT_FILTER gFilter = NULL;
 static PFLT_PORT   gServerPort = NULL;
 static PFLT_PORT   gClientPort = NULL;
+
+/* The live policy, and the safe default: look at the mark, escalate anything
+ * marked, and stay completely out of the way for everything else. That is what
+ * the driver does before a service has said otherwise, and what it falls back
+ * to if a push never arrives. */
+static SR_POLICY gPolicy = {
+    sizeof(SR_POLICY),
+    1,
+    SR_ACTION_ASK,
+    SR_ACTION_ALLOW,
+    1
+};
+
+static volatile LONG gMarkChecked = 0;
+static volatile LONG gMarkYes = 0;
+static volatile LONG gMarkNo = 0;
+static volatile LONG gDecisions = 0;
+static volatile LONG gEscalated = 0;
+static volatile LONG gLastMarkStatus = 0;
+static volatile LONG gConnects = 0;
+static volatile LONG gDisconnects = 0;
+static volatile LONG gPortReplaced = 0;
 
 /* ------------------------------------------------------------- user channel */
 
@@ -89,31 +156,102 @@ static NTSTATUS SRConnect(PFLT_PORT ClientPort, PVOID ServerPortCookie,
      * over from a stale client costs nothing and cannot be done by an
      * unprivileged process. */
     if (gClientPort != NULL) {
+        InterlockedIncrement(&gPortReplaced);
         FltCloseClientPort(gFilter, &gClientPort);
         gClientPort = NULL;
     }
     gClientPort = ClientPort;
+    InterlockedIncrement(&gConnects);
     return STATUS_SUCCESS;
 }
 
 static VOID SRDisconnect(PVOID ConnectionCookie) {
     UNREFERENCED_PARAMETER(ConnectionCookie);
+    InterlockedIncrement(&gDisconnects);
     if (gClientPort != NULL) {
         FltCloseClientPort(gFilter, &gClientPort);
         gClientPort = NULL;
     }
 }
 
+/* Policy push. This is the user-mode -> driver direction: the service calls
+ * FilterSendMessage, which lands here. It is what makes the disposition
+ * changeable at runtime - the alternative would be a registry value read at
+ * load time, which is a reboot to change, or a hard-coded constant, which is a
+ * rebuild. */
+static void SRFillStatus(PSR_STATUS Status) {
+    Status->Policy = gPolicy;
+    Status->MarkChecked = (ULONG)gMarkChecked;
+    Status->MarkYes = (ULONG)gMarkYes;
+    Status->MarkNo = (ULONG)gMarkNo;
+    Status->Decisions = (ULONG)gDecisions;
+    Status->Escalated = (ULONG)gEscalated;
+    Status->LastMarkStatus = (ULONG)gLastMarkStatus;
+    Status->Connects = (ULONG)gConnects;
+    Status->Disconnects = (ULONG)gDisconnects;
+    Status->PortReplaced = (ULONG)gPortReplaced;
+}
+
 static NTSTATUS SRMessage(PVOID ConnectionCookie, PVOID InputBuffer,
                           ULONG InputBufferSize, PVOID OutputBuffer,
                           ULONG OutputBufferSize, PULONG ReturnOutputBufferLength) {
+    ULONG command;
+
     UNREFERENCED_PARAMETER(ConnectionCookie);
-    UNREFERENCED_PARAMETER(InputBuffer);
-    UNREFERENCED_PARAMETER(InputBufferSize);
-    UNREFERENCED_PARAMETER(OutputBuffer);
-    UNREFERENCED_PARAMETER(OutputBufferSize);
-    UNREFERENCED_PARAMETER(ReturnOutputBufferLength);
-    return STATUS_NOT_IMPLEMENTED;
+
+    if (ReturnOutputBufferLength != NULL) {
+        *ReturnOutputBufferLength = 0;
+    }
+    if (InputBuffer == NULL || InputBufferSize < sizeof(ULONG)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    command = *(PULONG)InputBuffer;
+
+    if (command == SR_CMD_SET_POLICY) {
+        PSR_POLICY incoming;
+        /* The buffer starts with the command word; the structure follows it.
+         * Reading it from offset 0 makes Size and Version come out as the
+         * command value, which the validation below then rejects with
+         * STATUS_REVISION_MISMATCH - a push that fails while looking like a
+         * version problem. */
+        if (InputBufferSize < sizeof(ULONG) + sizeof(SR_POLICY)) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        incoming = (PSR_POLICY)((PUCHAR)InputBuffer + sizeof(ULONG));
+        /* Refuse a structure this build does not understand, and any action
+         * value that is not one we implement: silently storing an unknown
+         * action would leave the driver unable to decide and it would fall
+         * through to allowing deletes. */
+        if (incoming->Size != sizeof(SR_POLICY) || incoming->Version != 1) {
+            return STATUS_REVISION_MISMATCH;
+        }
+        if (incoming->ActionForMarked > SR_ACTION_ALLOW ||
+            incoming->ActionForUnmarked > SR_ACTION_ALLOW) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        gPolicy.ActionForMarked = incoming->ActionForMarked;
+        gPolicy.ActionForUnmarked = incoming->ActionForUnmarked;
+        gPolicy.CheckMark = incoming->CheckMark ? 1 : 0;
+        DbgPrint("SpaceRecycle: policy set marked=%lu unmarked=%lu check=%lu\n",
+                 gPolicy.ActionForMarked, gPolicy.ActionForUnmarked, gPolicy.CheckMark);
+    } else if (command != SR_CMD_GET_POLICY) {
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    /* Both commands answer with the same structure, and the answer is written
+     * on the way out of a push rather than requiring a second call. That is not
+     * only fewer round trips: reading the policy back in a separate
+     * FilterSendMessage returned ERROR_INVALID_HANDLE here, and a verification
+     * step that cannot run is worse than no verification step. */
+    if (OutputBuffer != NULL && OutputBufferSize >= sizeof(SR_STATUS)) {
+        SRFillStatus((PSR_STATUS)OutputBuffer);
+        if (ReturnOutputBufferLength != NULL) {
+            *ReturnOutputBufferLength = sizeof(SR_STATUS);
+        }
+    }
+    return STATUS_SUCCESS;
 }
 
 /* Asks user mode whether this path may go. Returns TRUE when the operation
@@ -169,6 +307,101 @@ static BOOLEAN SRAskUserMode(_In_ PCUNICODE_STRING Path, ULONG Operation) {
     return TRUE;
 }
 
+/* ------------------------------------------------------------------ policy */
+
+#define SR_STREAM_NAME_CHARS ((sizeof(SR_STREAM_NAME) / sizeof(WCHAR)) - 1)
+
+/* Does this file carry the mark at all?
+ *
+ * This is the whole reason the driver is not chatty. A file with no
+ * SpaceRecycle.Importance stream is not something this product has an opinion
+ * about, and the answer costs one failed open against a name that is not in the
+ * file's own record - no message, no user-mode thread, no context switch. On a
+ * machine doing thousands of deletes an hour, that is the difference between a
+ * filter nobody notices and one that shows up in every profile.
+ *
+ * The failure handling is deliberately asymmetric. Only "no such name" means
+ * unmarked. Any other error - access denied, a volume that has gone away -
+ * escalates, because a mark that cannot be read is not the same as a mark that
+ * is not there, and treating the two alike is a silent hole in the protection. */
+static BOOLEAN SRHasMark(PCFLT_RELATED_OBJECTS FltObjects, PCUNICODE_STRING Path) {
+    WCHAR buffer[SR_MAX_PATH_CHARS + 64];
+    UNICODE_STRING streamName;
+    OBJECT_ATTRIBUTES attributes;
+    IO_STATUS_BLOCK iosb;
+    HANDLE handle = NULL;
+    NTSTATUS status;
+    USHORT chars;
+
+    InterlockedIncrement(&gMarkChecked);
+
+    if (Path == NULL || Path->Buffer == NULL) {
+        InterlockedIncrement(&gMarkYes);
+        return TRUE;
+    }
+    chars = Path->Length / sizeof(WCHAR);
+    if (chars + SR_STREAM_NAME_CHARS >= (USHORT)(sizeof(buffer) / sizeof(WCHAR))) {
+        InterlockedIncrement(&gMarkYes);
+        return TRUE;    /* too long to describe; do not guess */
+    }
+
+    RtlCopyMemory(buffer, Path->Buffer, Path->Length);
+    RtlCopyMemory(buffer + chars, SR_STREAM_NAME,
+                  (SR_STREAM_NAME_CHARS + 1) * sizeof(WCHAR));
+
+    RtlInitUnicodeString(&streamName, buffer);
+    InitializeObjectAttributes(&attributes, &streamName,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    /* The stream is a plain data stream of the file being deleted, so a normal
+     * open on it answers the question. Note this open comes back through our
+     * own IRP_MJ_CREATE handler; it carries no FILE_DELETE_ON_CLOSE, so that
+     * handler returns immediately and there is no recursion. */
+    status = FltCreateFile(gFilter, FltObjects->Instance, &handle,
+                           FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attributes, &iosb,
+                           NULL, 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           FILE_OPEN,
+                           FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                           NULL, 0, 0);
+    if (NT_SUCCESS(status)) {
+        FltClose(handle);
+        InterlockedExchange(&gLastMarkStatus, (LONG)status);
+        InterlockedIncrement(&gMarkYes);
+        return TRUE;
+    }
+    InterlockedExchange(&gLastMarkStatus, (LONG)status);
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND) {
+        InterlockedIncrement(&gMarkNo);
+        return FALSE;
+    }
+    InterlockedIncrement(&gMarkYes);
+    return TRUE;        /* could not tell; escalate rather than assume */
+}
+
+/* The single place a delete decision is made. Returns TRUE to allow.
+ *
+ * Order is the point. The mark check runs first, so a file nobody has marked
+ * never costs a message. The policy then decides whether the marked case is
+ * answered here or passed up - which is what makes "do not prompt, just refuse"
+ * a settings-screen change rather than a driver change. */
+static BOOLEAN SRDecide(PCFLT_RELATED_OBJECTS FltObjects,
+                        PFLT_FILE_NAME_INFORMATION Info, ULONG Operation) {
+    BOOLEAN marked = gPolicy.CheckMark ? SRHasMark(FltObjects, &Info->Name) : TRUE;
+    ULONG action = marked ? gPolicy.ActionForMarked : gPolicy.ActionForUnmarked;
+
+    InterlockedIncrement(&gDecisions);
+
+    if (action == SR_ACTION_DENY) {
+        return FALSE;
+    }
+    if (action == SR_ACTION_ALLOW) {
+        return TRUE;
+    }
+    InterlockedIncrement(&gEscalated);
+    return SRAskUserMode(&Info->Name, Operation);
+}
+
 /* -------------------------------------------------------------- interception */
 
 /* Turns a callback's file object into a normalized DOS path. Returns TRUE and
@@ -206,7 +439,6 @@ static FLT_PREOP_CALLBACK_STATUS SRPreSetInformation(
     FLT_PREOP_CALLBACK_STATUS result = FLT_PREOP_SUCCESS_NO_CALLBACK;
     ULONG operation = SR_OP_DELETE;
 
-    UNREFERENCED_PARAMETER(FltObjects);
     UNREFERENCED_PARAMETER(CompletionContext);
 
     if (Data->Iopb->Parameters.SetFileInformation.FileInformationClass ==
@@ -239,7 +471,7 @@ static FLT_PREOP_CALLBACK_STATUS SRPreSetInformation(
 
     DbgPrint("SpaceRecycle: delete attempt %wZ\n", &info->Name);
 
-    if (!SRAskUserMode(&info->Name, operation)) {
+    if (!SRDecide(FltObjects, info, operation)) {
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         result = FLT_PREOP_COMPLETE;
@@ -254,7 +486,6 @@ static FLT_PREOP_CALLBACK_STATUS SRPreCreate(
     PFLT_FILE_NAME_INFORMATION info = NULL;
     FLT_PREOP_CALLBACK_STATUS result = FLT_PREOP_SUCCESS_NO_CALLBACK;
 
-    UNREFERENCED_PARAMETER(FltObjects);
     UNREFERENCED_PARAMETER(CompletionContext);
 
     if (!FlagOn(Data->Iopb->Parameters.Create.Options, FILE_DELETE_ON_CLOSE)) {
@@ -266,7 +497,7 @@ static FLT_PREOP_CALLBACK_STATUS SRPreCreate(
 
     DbgPrint("SpaceRecycle: delete-on-close %wZ\n", &info->Name);
 
-    if (!SRAskUserMode(&info->Name, SR_OP_DELETE_ON_CLOSE)) {
+    if (!SRDecide(FltObjects, info, SR_OP_DELETE_ON_CLOSE)) {
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         result = FLT_PREOP_COMPLETE;
