@@ -75,6 +75,19 @@ typedef struct _SR_REPLY {
 #define SR_CMD_SET_POLICY 1
 #define SR_CMD_GET_POLICY 2
 
+/* Which job a client connection is for.
+ *
+ * Two connections exist because one port handle cannot carry both directions at
+ * once: a FilterSendMessage issued while the other side is blocked in
+ * FilterGetMessage on the same handle corrupts the receive, which returns
+ * success without writing the buffer. The request that was waiting is then
+ * answered by nobody, the three-second timeout expires, and the delete fails
+ * open - so a policy change could cost a delete its protection. Separate
+ * handles mean the two directions never share a queue. */
+#define SR_PORT_ROLE_REQUESTS 1
+#define SR_PORT_ROLE_POLICY   2
+#define SR_MAX_CONNECTIONS    2
+
 typedef struct _SR_POLICY {
     ULONG Size;               /* sizeof(SR_POLICY). A newer user-mode side
                                * sending a bigger structure is rejected rather
@@ -104,11 +117,18 @@ typedef struct _SR_STATUS {
     ULONG Connects;         /* times a client attached */
     ULONG Disconnects;      /* times a client detached */
     ULONG PortReplaced;     /* times a new client displaced an old one */
+    ULONG HasRequestPort;   /* 1 when a delete-request client is attached */
+    ULONG HasPolicyPort;    /* 1 when a policy client is attached */
 } SR_STATUS, *PSR_STATUS;
 
 static PFLT_FILTER gFilter = NULL;
 static PFLT_PORT   gServerPort = NULL;
+/* The client that receives delete requests. FltSendMessage sends here, so the
+ * service must keep a thread blocked on this handle's FilterGetMessage. */
 static PFLT_PORT   gClientPort = NULL;
+/* The client used for policy pushes. Nothing ever blocks on it, which is the
+ * whole point of keeping it separate. */
+static PFLT_PORT   gPolicyPort = NULL;
 
 /* The live policy, and the safe default: look at the mark, escalate anything
  * marked, and stay completely out of the way for everything else. That is what
@@ -137,14 +157,24 @@ static volatile LONG gPortReplaced = 0;
 static NTSTATUS SRConnect(PFLT_PORT ClientPort, PVOID ServerPortCookie,
                           PVOID ConnectionContext, ULONG SizeOfContext,
                           PVOID* ConnectionPortCookie) {
-    UNREFERENCED_PARAMETER(ServerPortCookie);
-    UNREFERENCED_PARAMETER(ConnectionContext);
-    UNREFERENCED_PARAMETER(SizeOfContext);
-    UNREFERENCED_PARAMETER(ConnectionPortCookie);
+    ULONG role = SR_PORT_ROLE_REQUESTS;
 
-    /* A new connection replaces the old one rather than being refused.
+    UNREFERENCED_PARAMETER(ServerPortCookie);
+
+    /* The caller states which job it is connecting for. Anything unrecognised
+     * is treated as a request client, because that is the connection the
+     * protection depends on. */
+    if (ConnectionContext != NULL && SizeOfContext >= sizeof(ULONG)) {
+        ULONG requested = *(PULONG)ConnectionContext;
+        if (requested == SR_PORT_ROLE_POLICY) {
+            role = SR_PORT_ROLE_POLICY;
+        }
+    }
+
+    /* A new connection replaces the old one of the same role rather than being
+     * refused.
      *
-     * The first version returned STATUS_CONNECTION_COUNT_LIMIT while a client
+     * The first version returned STATUS_CONNECTION_COUNT_LIMIT while any client
      * was attached. That looked like a sensible guard and was in fact a way for
      * the protection to disappear: when the guard service was killed and
      * restarted, its client port had not been released, so the replacement
@@ -152,25 +182,47 @@ static NTSTATUS SRConnect(PFLT_PORT ClientPort, PVOID ServerPortCookie,
      * (0x800704D6). With no client attached, every delete then failed open, and
      * fail-open is silent by design.
      *
-     * The port's security descriptor already limits who may connect, so taking
-     * over from a stale client costs nothing and cannot be done by an
-     * unprivileged process. */
-    if (gClientPort != NULL) {
-        InterlockedIncrement(&gPortReplaced);
-        FltCloseClientPort(gFilter, &gClientPort);
-        gClientPort = NULL;
+     * Replacement is per role, so a fresh policy connection does not evict the
+     * client that answers deletes. */
+    if (role == SR_PORT_ROLE_POLICY) {
+        if (gPolicyPort != NULL) {
+            InterlockedIncrement(&gPortReplaced);
+            FltCloseClientPort(gFilter, &gPolicyPort);
+            gPolicyPort = NULL;
+        }
+        gPolicyPort = ClientPort;
+    } else {
+        if (gClientPort != NULL) {
+            InterlockedIncrement(&gPortReplaced);
+            FltCloseClientPort(gFilter, &gClientPort);
+            gClientPort = NULL;
+        }
+        gClientPort = ClientPort;
     }
-    gClientPort = ClientPort;
+
+    /* Handed back on disconnect so the right slot is cleared. Without it, a
+     * policy client going away would take the request port with it. */
+    if (ConnectionPortCookie != NULL) {
+        *ConnectionPortCookie = (PVOID)(ULONG_PTR)role;
+    }
     InterlockedIncrement(&gConnects);
     return STATUS_SUCCESS;
 }
 
 static VOID SRDisconnect(PVOID ConnectionCookie) {
-    UNREFERENCED_PARAMETER(ConnectionCookie);
+    ULONG role = (ULONG)(ULONG_PTR)ConnectionCookie;
+
     InterlockedIncrement(&gDisconnects);
-    if (gClientPort != NULL) {
-        FltCloseClientPort(gFilter, &gClientPort);
-        gClientPort = NULL;
+    if (role == SR_PORT_ROLE_POLICY) {
+        if (gPolicyPort != NULL) {
+            FltCloseClientPort(gFilter, &gPolicyPort);
+            gPolicyPort = NULL;
+        }
+    } else {
+        if (gClientPort != NULL) {
+            FltCloseClientPort(gFilter, &gClientPort);
+            gClientPort = NULL;
+        }
     }
 }
 
@@ -190,6 +242,8 @@ static void SRFillStatus(PSR_STATUS Status) {
     Status->Connects = (ULONG)gConnects;
     Status->Disconnects = (ULONG)gDisconnects;
     Status->PortReplaced = (ULONG)gPortReplaced;
+    Status->HasRequestPort = (gClientPort != NULL) ? 1 : 0;
+    Status->HasPolicyPort = (gPolicyPort != NULL) ? 1 : 0;
 }
 
 static NTSTATUS SRMessage(PVOID ConnectionCookie, PVOID InputBuffer,
@@ -566,7 +620,8 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
                                OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, sd);
 
     status = FltCreateCommunicationPort(gFilter, &gServerPort, &attributes, NULL,
-                                        SRConnect, SRDisconnect, SRMessage, 1);
+                                        SRConnect, SRDisconnect, SRMessage,
+                                        SR_MAX_CONNECTIONS);
     if (!NT_SUCCESS(status)) {
         DbgPrint("SpaceRecycle: FltCreateCommunicationPort failed 0x%08X\n", status);
         FltUnregisterFilter(gFilter);

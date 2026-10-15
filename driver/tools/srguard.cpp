@@ -47,6 +47,11 @@
 #define SR_MAX_PATH_CHARS  520
 #define SR_OP_DELETE       1
 
+/* Must match the driver. Two connections, because one handle cannot carry a
+ * blocking receive and a send at the same time. */
+#define SR_PORT_ROLE_REQUESTS 1
+#define SR_PORT_ROLE_POLICY   2
+
 typedef struct _SR_NOTIFY {
     ULONG Size;
     ULONG Operation;
@@ -95,6 +100,8 @@ typedef struct _SR_STATUS {
     ULONG Connects;
     ULONG Disconnects;
     ULONG PortReplaced;
+    ULONG HasRequestPort;
+    ULONG HasPolicyPort;
 } SR_STATUS, *PSR_STATUS;
 
 static HANDLE gLog = INVALID_HANDLE_VALUE;
@@ -102,6 +109,9 @@ static SERVICE_STATUS gStatus = {0};
 static SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
 static HANDLE gStopEvent = nullptr;
 static HANDLE gPort = INVALID_HANDLE_VALUE;
+/* Policy goes out on its own handle so it never shares a queue with the
+ * blocking receive on gPort. */
+static HANDLE gPolicyPort = INVALID_HANDLE_VALUE;
 static bool gNoPrompt = false;
 static std::wstring gPolicyPath;
 static volatile LONG gPolicyPushCount = 0;
@@ -323,6 +333,10 @@ static void DeleteWithMarkRemoved(const std::wstring& dosPath) {
 
 /* ------------------------------------------------------------------ policy */
 
+/* Defined with the main loop below; declared here because a policy push
+ * reconnects its own port when the handle goes stale. */
+static bool ConnectToFilter(bool forPolicy);
+
 static const char* ActionName(ULONG action) {
     switch (action) {
     case SR_ACTION_ASK:   return "ask";
@@ -409,9 +423,12 @@ static void LoadPolicyFile(SR_POLICY* policy) {
 /// message was delivered; without the echo, a driver that rejected the structure
 /// would look exactly like a successful push and the settings screen would
 /// report a change that never took effect.
-static bool PushPolicy(const SR_POLICY& policy) {
-    if (gPort == INVALID_HANDLE_VALUE) {
-        return false;
+static bool PushPolicy(const SR_POLICY& policy, bool allowReconnect = true) {
+    if (gPolicyPort == INVALID_HANDLE_VALUE) {
+        if (!allowReconnect || !ConnectToFilter(true)) {
+            Log("policy push skipped: no policy connection");
+            return false;
+        }
     }
 
     unsigned char inBuffer[sizeof(ULONG) + sizeof(SR_POLICY)];
@@ -422,10 +439,17 @@ static bool PushPolicy(const SR_POLICY& policy) {
     SR_STATUS status;
     ZeroMemory(&status, sizeof(status));
     DWORD returned = 0;
-    HRESULT hr = FilterSendMessage(gPort, inBuffer, (DWORD)sizeof(inBuffer),
+    HRESULT hr = FilterSendMessage(gPolicyPort, inBuffer, (DWORD)sizeof(inBuffer),
                                    &status, sizeof(status), &returned);
     if (FAILED(hr)) {
         Log("policy push rejected: hr=0x%08lX", (unsigned long)hr);
+        /* A stale policy handle is worth one clean retry: the driver may have
+         * been reloaded under us, in which case every subsequent push would
+         * fail the same way and the disposition would silently freeze. */
+        if (allowReconnect && ConnectToFilter(true)) {
+            Log("policy connection re-established; retrying the push");
+            return PushPolicy(policy, false);
+        }
         return false;
     }
     if (returned < sizeof(SR_STATUS)) {
@@ -448,9 +472,10 @@ static bool PushPolicy(const SR_POLICY& policy) {
         (unsigned long)status.Decisions, (unsigned long)status.Escalated,
         (unsigned long)status.MarkChecked, (unsigned long)status.MarkYes,
         (unsigned long)status.MarkNo, (unsigned long)status.LastMarkStatus);
-    Log("  driver port: connects=%lu disconnects=%lu replaced=%lu",
+    Log("  driver port: connects=%lu disconnects=%lu replaced=%lu request_port=%lu policy_port=%lu",
         (unsigned long)status.Connects, (unsigned long)status.Disconnects,
-        (unsigned long)status.PortReplaced);
+        (unsigned long)status.PortReplaced, (unsigned long)status.HasRequestPort,
+        (unsigned long)status.HasPolicyPort);
     return true;
 }
 
@@ -508,19 +533,34 @@ static DWORD WINAPI PolicyWatcher(LPVOID) {
 /* --------------------------------------------------------------- main loop */
 
 /// Attaches to the filter port, retrying while the driver is still starting.
-static bool ConnectToFilter() {
+///
+/// `forPolicy` picks which of the two connections this is. The role travels in
+/// the connect context so the driver can keep them apart and, more importantly,
+/// tear down the right one when a client goes away.
+static bool ConnectToFilter(bool forPolicy) {
+    const ULONG role = forPolicy ? SR_PORT_ROLE_POLICY : SR_PORT_ROLE_REQUESTS;
+    HANDLE* slot = forPolicy ? &gPolicyPort : &gPort;
     HRESULT hr = E_FAIL;
+
+    if (*slot != INVALID_HANDLE_VALUE) {
+        CloseHandle(*slot);
+        *slot = INVALID_HANDLE_VALUE;
+    }
     for (int attempt = 1; attempt <= 30; ++attempt) {
-        hr = FilterConnectCommunicationPort(SR_PORT_NAME, 0, nullptr, 0, nullptr, &gPort);
+        hr = FilterConnectCommunicationPort(SR_PORT_NAME, 0,
+                                            (PVOID)&role, (WORD)sizeof(role),
+                                            nullptr, slot);
         if (SUCCEEDED(hr)) {
             return true;
         }
         if (attempt == 1 || attempt % 5 == 0) {
-            Log("connect attempt %d failed: hr=0x%08lX", attempt, (unsigned long)hr);
+            Log("connect (%s) attempt %d failed: hr=0x%08lX",
+                forPolicy ? "policy" : "requests", attempt, (unsigned long)hr);
         }
         Sleep(1000);
     }
-    Log("cannot reach the filter (hr=0x%08lX)", (unsigned long)hr);
+    Log("cannot reach the filter on the %s port (hr=0x%08lX)",
+        forPolicy ? "policy" : "requests", (unsigned long)hr);
     return false;
 }
 
@@ -530,11 +570,18 @@ static DWORD WINAPI GuardLoop(LPVOID) {
     Log("guard starting (pid %lu, prompt=%s)", GetCurrentProcessId(),
         gNoPrompt ? "off" : "on");
 
-    if (!ConnectToFilter()) {
+    if (!ConnectToFilter(false)) {
         Log("guard idle");
         return 1;
     }
-    Log("connected to the filter");
+    /* The policy connection is opened before anything else so the very first
+     * push cannot land on the handle the receive loop is about to block on.
+     * If it cannot be opened the guard still runs: deletions are answered, and
+     * the driver keeps whatever policy it already had. */
+    if (!ConnectToFilter(true)) {
+        Log("no policy connection; driver keeps its current disposition");
+    }
+    Log("connected to the filter (requests + policy)");
 
     /* Push the configured policy before starting the watcher, and do it on this
      * thread. The first version let the watcher do it, which meant the very
@@ -599,7 +646,7 @@ static DWORD WINAPI GuardLoop(LPVOID) {
                 break;
             }
             Sleep(1000);
-            if (!ConnectToFilter()) {
+            if (!ConnectToFilter(false)) {
                 Sleep(2000);
                 continue;
             }
@@ -628,12 +675,8 @@ static DWORD WINAPI GuardLoop(LPVOID) {
             if (++unfilledReceives > 20) {
                 Log("giving up after %d unfilled receives; reconnecting", unfilledReceives);
                 unfilledReceives = 0;
-                if (gPort != INVALID_HANDLE_VALUE) {
-                    CloseHandle(gPort);
-                    gPort = INVALID_HANDLE_VALUE;
-                }
                 Sleep(1000);
-                ConnectToFilter();
+                ConnectToFilter(false);   /* also closes the stale handle */
             }
             continue;   /* never reply: there is nothing here to answer */
         }
@@ -695,6 +738,10 @@ static DWORD WINAPI GuardLoop(LPVOID) {
     if (gPort != INVALID_HANDLE_VALUE) {
         CloseHandle(gPort);
         gPort = INVALID_HANDLE_VALUE;
+    }
+    if (gPolicyPort != INVALID_HANDLE_VALUE) {
+        CloseHandle(gPolicyPort);
+        gPolicyPort = INVALID_HANDLE_VALUE;
     }
     Log("guard stopped");
     return 0;
