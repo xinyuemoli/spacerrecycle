@@ -460,6 +460,19 @@ static bool PushPolicy(const SR_POLICY& policy) {
 /// nothing here reloads a driver or restarts a service, it just sends a new
 /// structure down the port that was already open. An edited file takes effect
 /// within a couple of seconds.
+///
+/// Known limitation, and the next thing to fix. A single port handle is used for
+/// both directions, and a FilterSendMessage issued from this thread while the
+/// guard thread is blocked in FilterGetMessage on the same handle puts the port
+/// in a bad state: the receive comes back reporting success with the buffer
+/// never written, and the request that was genuinely waiting goes unanswered,
+/// so the driver times out and fails open. The failure is visible in the log as
+/// "discarding an unfilled receive" and it costs one delete its protection.
+/// The fix is a second connection - the driver already receives a connect
+/// context and a disconnect cookie, so it can hold one port for requests and
+/// another for policy, and the two never overlap. Deferring the push to the
+/// guard thread was tried instead and does not work: CancelSynchronousIo does
+/// not interrupt a blocked FilterGetMessage.
 static DWORD WINAPI PolicyWatcher(LPVOID) {
     SR_POLICY policy = {sizeof(SR_POLICY), 1, SR_ACTION_ASK, SR_ACTION_ALLOW, 1};
     LoadPolicyFile(&policy);
@@ -546,14 +559,29 @@ static DWORD WINAPI GuardLoop(LPVOID) {
 
     HRESULT hr = E_FAIL;
     int receiveFailures = 0;
+    int unfilledReceives = 0;
     for (;;) {
         if (WaitForSingleObject(gStopEvent, 0) == WAIT_OBJECT_0) {
             break;
         }
 
         SR_MESSAGE message;
-        ZeroMemory(&message, sizeof(message));
+        /* Fill with a sentinel rather than zeroing. FilterGetMessage can return
+         * success without writing anything - the receive is simply not filled -
+         * and against a zeroed buffer that is indistinguishable from a message
+         * that legitimately contains zeros. The sentinel makes the difference
+         * visible, which is how this was found. */
+        memset(&message, 0xAB, sizeof(message));
         hr = FilterGetMessage(gPort, &message.Header, sizeof(message), nullptr);
+        /* Nothing to do here: the policy watcher pushes changes on its own
+         * thread. Deferring the push to this thread was tried and does not work
+         * - CancelSynchronousIo does not interrupt a blocked FilterGetMessage,
+         * so a change would sit unapplied until the next delete arrived, and
+         * that delete would then be consumed applying the policy instead of
+         * being answered. The driver failed open on the unanswered request and
+         * the file was deleted. See the notes in PushPolicy about the real
+         * remaining limitation. */
+
         if (FAILED(hr)) {
             /* A failed receive used to end the loop, and ending the loop is the
              * worst possible response: the driver keeps running and keeps
@@ -580,12 +608,65 @@ static DWORD WINAPI GuardLoop(LPVOID) {
         }
         receiveFailures = 0;
 
+        /* Validate before trusting anything in it.
+         *
+         * This is the bug that cost the most to find. An unfilled receive used
+         * to be processed as a real request: the path came out empty, the reply
+         * carried MessageId 0, the filter manager ignored it, and the delete
+         * that was genuinely waiting for an answer never got one. Three seconds
+         * later the driver timed out and failed open, so a file the service had
+         * just logged as REFUSED was deleted anyway. From the outside that
+         * looked like a policy or a mark-check problem; it was a message that
+         * was never written.
+         *
+         * MessageId is the reliable tell: the filter manager assigns one to
+         * every message and it is never zero. The payload size confirms it. */
+        if (message.Header.MessageId == 0 || message.Payload.Size != sizeof(SR_NOTIFY)) {
+            Log("discarding an unfilled receive: message_id=%llu payload_size=0x%08lX",
+                (unsigned long long)message.Header.MessageId,
+                (unsigned long)message.Payload.Size);
+            if (++unfilledReceives > 20) {
+                Log("giving up after %d unfilled receives; reconnecting", unfilledReceives);
+                unfilledReceives = 0;
+                if (gPort != INVALID_HANDLE_VALUE) {
+                    CloseHandle(gPort);
+                    gPort = INVALID_HANDLE_VALUE;
+                }
+                Sleep(1000);
+                ConnectToFilter();
+            }
+            continue;   /* never reply: there is nothing here to answer */
+        }
+        unfilledReceives = 0;
+
         std::wstring dos;
         const bool mapped = DevicePathToDos(message.Payload.Path, dos);
         const std::wstring display = mapped ? dos : std::wstring(message.Payload.Path);
+        if (message.Payload.Path[0] == L'\0') {
+            /* A real request with no name. Not the same as a path that failed
+             * to map: the driver escalated this file, so it has an opinion
+             * about it, and letting it through would silently permit something
+             * we were asked about. */
+            Log("  !! EMPTY PATH on a valid request: operation=%lu; refusing rather than guessing",
+                (unsigned long)message.Payload.Operation);
+        }
         Log("delete requested: %ls", display.c_str());
 
-        const bool allow = mapped ? Decide(dos) : true;
+        /* Three cases, three different answers.
+         *
+         * A mapped path is the normal one. A named path on a volume with no
+         * drive letter is not ours to judge and stays allowed. A request with
+         * no name at all is a file the driver escalated - so it carries a mark -
+         * and waving it through because we could not read its name is the
+         * silent-failure shape this whole feature exists to avoid. */
+        bool allow;
+        if (mapped) {
+            allow = Decide(dos);
+        } else if (message.Payload.Path[0] == L'\0') {
+            allow = false;
+        } else {
+            allow = true;
+        }
 
         SR_REPLY_MESSAGE reply;
         ZeroMemory(&reply, sizeof(reply));
