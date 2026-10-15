@@ -241,3 +241,35 @@ instantly, "confirming" a policy that had not been applied yet. The phases now
 assert the service is running and wait only on log lines written after the phase
 began.
 
+## The settings screen writes the file, the service pushes it
+
+The choice the user makes - ask, block, or allow - is not stored in the app's
+own config. The kernel asks the service, so the value belongs to the service,
+and the screen writes `%ProgramData%\SpaceRecycle\policy.ini`. The service
+watches that file and pushes a change within a couple of seconds.
+
+`%ProgramData%` rather than the user's profile because the service runs as
+LocalSystem and cannot be assumed to share the interactive user's session. That
+creates a permission problem the service solves at startup: it creates the file
+if it is missing and widens its DACL, verified in the guest as
+`BUILTIN\Users:(R,W,D)`.
+
+The tradeoff is deliberate: **any local user can weaken the protection by
+choosing `allow`**. That is consistent with what this feature is - it guards
+against deleting the wrong thing by accident, not against a user determined to
+delete it, the same honesty the filter's own comments carry. On a machine where
+that is not acceptable, tighten the ACL to Administrators and drop the control
+from the screen.
+
+Verified end to end in `vm/ui-policy-test.cmd`: with the file deleted the service
+recreates it; `deny` refuses the delete with the escalation log completely flat,
+meaning no message crossed to user mode; `allow` lets the same delete through,
+also flat; `ask` escalates again.
+
+The screen also reports whether the service is running, which is not decoration.
+With no service attached the driver fails open by design, so a marked file
+simply deletes - indistinguishable, from the outside, from nothing having been
+marked. A screen showing only the choice would be describing something that is
+not happening.
+
+
