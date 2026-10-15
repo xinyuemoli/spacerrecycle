@@ -38,6 +38,7 @@ const state = {
   menu: null,               // { path, name, level, x, y } right-click menu anchor
   onedrive: null,           // { available, roots } from the backend, null until asked
   entitlement: null,        // subscription state, loaded when Settings opens
+  guard: null,              // delete-guard disposition + whether it is running
   /**
    * OneDrive account + cloud quota.
    *
@@ -890,6 +891,17 @@ export const actions = {
     state.auditLog = await invoke("read_audit_log", { limit: 200 });
     state.auditPath = await invoke("audit_log_path");
     state.showSettings = true;
+    // The guard's disposition lives outside this app's config, in the file the
+    // resident service reads, so it is fetched rather than read from state.
+    // Its status comes along because the screen has to be able to say that
+    // nothing is being protected right now, which is invisible otherwise.
+    // A failure here must not take the whole settings tab with it: every other
+    // control on it still works, and the card degrades to the plain choices.
+    try {
+      state.guard = await invoke("guard_status");
+    } catch (e) {
+      state.guard = null;
+    }
     // Subscription state is only shown here, so it is fetched when this tab
     // opens rather than on every launch: an entitlement check on a packaged
     // build is a Store round trip.
@@ -1111,8 +1123,29 @@ export const actions = {
     }
   },
 
-  async loadBatchItems(dir) {
+  /// Change what the guard does about a marked file on delete.
+  ///
+  /// The value goes into the file the resident service watches, so the screen
+  /// updates at once and the kernel follows a couple of seconds later. There is
+  /// no synchronisation to wait on here and pretending otherwise would misstate
+  /// what is actually immediate: this app cannot see the driver's state.
+  async setGuardDisposition(disposition) {
+    const previous = state.guard;
+    if (previous) state.guard = Object.assign({}, previous, { disposition });
+    render();
     try {
+      await invoke("set_guard_disposition", { disposition });
+      state.guard = await invoke("guard_status");
+      render();
+      toast(t(state.lang, "set.guard.saved"), "ok");
+    } catch (e) {
+      state.guard = previous;
+      render();
+      toast(t(state.lang, "toast.saveFail", { e }), "err");
+    }
+  },
+
+  async loadBatchItems(dir) {    try {
       const m = await invoke("list_quarantine_entries", { batchDir: dir });
       state.openBatch = state.openBatch === dir ? null : dir;
       state.batchItems = m ? m.entries : [];

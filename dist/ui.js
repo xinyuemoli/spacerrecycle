@@ -914,6 +914,57 @@ function connectPanel(c) {
     </div>`;
 }
 
+/// What the delete guard does with a file marked 重要.
+///
+/// This is the one control on this screen that does not live in this app's own
+/// config. The kernel filter asks the resident service, so the decision belongs
+/// to the service's policy file, and the service picks up an edit within a
+/// couple of seconds.
+///
+/// The status line is not decoration. With no service running the filter fails
+/// open by design, so a marked file simply deletes; a screen showing only the
+/// choice would be describing something that is not happening, and the user
+/// would have no way to tell that apart from "nothing was marked".
+function guardCard() {
+  const g = state.guard || {
+    disposition: "ask", serviceInstalled: false, serviceRunning: false,
+    configured: false, unknown: true,
+  };
+
+  let status = "";
+  if (!g.unknown) {
+    status = !g.serviceInstalled
+      ? T("set.guard.notInstalled")
+      : (g.serviceRunning ? T("set.guard.active") : T("set.guard.installedNotRunning"));
+  }
+  const health = g.unknown ? "" : (g.serviceRunning ? "ok" : "warn");
+
+  const option = (value, labelKey, hintKey) => {
+    const on = g.disposition === value;
+    return h`
+      <label class="guardopt${on ? " on" : ""}">
+        <input type="radio" name="guard-dispo" value="${value}" data-act="guard" ${on ? "checked" : ""} />
+        <span>
+          <span class="setlabel">${T(labelKey)}</span>
+          <span class="faint guardhint">${T(hintKey)}</span>
+        </span>
+      </label>`;
+  };
+
+  return h`
+    <h2 class="section">${T("set.guard")}</h2>
+    <div class="card mb">
+      <div class="faint" style="font-size:11px">${T("set.guardHint")}</div>
+      ${health ? h`<div class="guardstatus ${health}">${status}</div>` : ""}
+      <div class="guardopts">
+        ${option("ask", "set.guard.ask", "set.guard.askHint")}
+        ${option("deny", "set.guard.deny", "set.guard.denyHint")}
+        ${option("allow", "set.guard.allow", "set.guard.allowHint")}
+      </div>
+      ${g.configured ? "" : h`<div class="faint mt" style="font-size:11px">${T("set.guard.default")}</div>`}
+    </div>`;
+}
+
 function settingsView() {
   const c = state.config || {};
   const log = state.auditLog || [];
@@ -964,6 +1015,8 @@ function settingsView() {
         <span class="faint" style="font-size:11px">${T("set.instant")}</span>
       </div>
     </div>
+
+    ${guardCard()}
 
     ${subscriptionCard()}
 
@@ -1096,6 +1149,7 @@ function bind() {
     else if (act === "imp-filter") actions.setImportanceFilter(t.value);
     else if (act === "red-confirm") actions.setRedConfirm(t.checked);
     else if (act === "lang") actions.setLang(t.value);
+    else if (act === "guard") actions.setGuardDisposition(t.value);
     // "sel" and "cat-sel" are deliberately absent: they are checkboxes, and
     // the click listener already handles them. Handling both made every tick
     // fire twice - on, then off again - so a row could not be selected at all.

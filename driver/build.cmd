@@ -23,7 +23,7 @@ if not exist bin mkdir bin
 echo === compiling srdelete.c ===
 REM /D_AMD64_ is what the WDK's MSBuild driver project defines for x64; without
 REM it ntdef.h stops at "#error No Target Architecture".
-cl /nologo /kernel /c /W4 /O2 ^
+cl /nologo /kernel /c /W4 /O2 /wd4324 ^
    /D_AMD64_ ^
    /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 /DNTDDI_VERSION=0x06010000 ^
    /DPOOL_NX_OPTIN=1 ^

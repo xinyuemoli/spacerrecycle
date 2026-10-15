@@ -765,3 +765,26 @@ pub async fn clear_importance(path: String) -> Result<(), String> {
     })
     .await
 }
+
+/// The delete guard's disposition, plus whether it is actually running.
+///
+/// Both halves matter together. With no service attached the driver fails open
+/// by design, so a marked file simply deletes - and a screen that showed only
+/// the disposition would be describing something that is not happening. The
+/// status is what lets it say that the setting was saved but nothing is being
+/// protected right now.
+#[tauri::command]
+pub async fn guard_status() -> crate::guard::Status {
+    offload(crate::guard::status).await
+}
+
+/// Change what happens to a marked file on delete.
+///
+/// Written to the service's policy file rather than applied here: the service
+/// owns the file, watches it, and pushes the value into the kernel filter, so a
+/// change lands within a couple of seconds and survives a reboot.
+#[tauri::command]
+pub async fn set_guard_disposition(disposition: crate::guard::Disposition) -> Result<(), String> {
+    offload(move || crate::guard::write(disposition).map_err(|e| format!("无法写入守护策略：{e}")))
+        .await
+}

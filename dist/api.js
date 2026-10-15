@@ -18,7 +18,19 @@ export async function listen(event, handler) {
   return () => {};
 }
 
-function stub(cmd) {
+// The guard's disposition lives outside this app, in the file the resident
+// service reads. The stub keeps it in memory so the settings screen still
+// behaves coherently when the UI is opened without a backend - a stub that
+// always answered the same thing would make "changing the setting" look broken.
+const stubGuard = {
+  serviceInstalled: false,
+  serviceRunning: false,
+  policyPath: "",
+  disposition: "ask",
+  configured: false,
+};
+
+function stub(cmd, args) {
   switch (cmd) {
     case "get_volumes": return [];
     case "get_config": return {
@@ -31,6 +43,17 @@ function stub(cmd) {
       return { expiryDays: 7, expiredBatches: [], expiredItems: 0, expiredOnDiskBytes: 0 };
     case "list_quarantine_batches": return [];
     case "list_importance": return [];
+    case "guard_status": return Object.assign({}, stubGuard);
+    case "set_guard_disposition":
+      // Rejecting an unknown value is what the real backend does too - the
+      // Rust side deserialises into a three-variant enum - so having the stub
+      // do the same keeps the failure path testable.
+      if (!args || !["ask", "deny", "allow"].includes(args.disposition)) {
+        throw new Error("unknown disposition: " + (args && args.disposition));
+      }
+      stubGuard.disposition = args.disposition;
+      stubGuard.configured = true;
+      return null;
     case "onedrive_status": return { available: false, roots: [] };
     case "get_entitlement": return { subscriber: false, source: "not_configured", checkedUnix: 0, expiresUnix: null, detail: "" };
     case "refresh_entitlement": return { subscriber: false, source: "not_configured", checkedUnix: 0, expiresUnix: null, detail: "" };

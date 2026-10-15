@@ -372,6 +372,25 @@ input[type=checkbox] { accent-color: var(--accent-dim); cursor: pointer; margin:
 }
 .setrow input[type=number]:focus { border-color: var(--accent-dim); }
 
+/* ---------- Delete guard ---------- */
+.guardopts { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.guardopt {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 8px 10px; border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); cursor: pointer;
+}
+.guardopt:hover { border-color: var(--border); }
+.guardopt.on { border-color: var(--accent-dim); background: var(--bg-elev-2); }
+.guardopt input[type=radio] { margin: 2px 0 0; accent-color: var(--accent); flex: none; }
+.guardopt span { display: block; }
+.guardhint { font-size: 11px; margin-top: 2px; display: block; }
+.guardstatus {
+  margin-top: 10px; padding: 7px 10px; border-radius: var(--radius-sm);
+  font-size: 11px; line-height: 1.5;
+}
+.guardstatus.ok { background: rgba(63, 185, 80, .12); color: var(--green); }
+.guardstatus.warn { background: rgba(210, 153, 34, .14); color: var(--yellow); }
+
 /* ---------- Large-file drill-down ---------- */
 td.path {
   cursor: pointer;

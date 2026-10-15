@@ -2,6 +2,7 @@ pub mod cloud;
 pub mod commands;
 pub mod config;
 pub mod engine;
+pub mod guard;
 pub mod importance;
 pub mod license;
 pub mod log;
@@ -88,6 +89,8 @@ pub fn run() {
             commands::list_importance,
             commands::set_importance,
             commands::clear_importance,
+            commands::guard_status,
+            commands::set_guard_disposition,
             commands::onedrive_status,
             commands::get_entitlement,
             commands::refresh_entitlement,

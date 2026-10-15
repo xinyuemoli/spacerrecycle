@@ -39,6 +39,7 @@
 #include <string.h>
 #include <string>
 #include <new>
+#include <aclapi.h>
 
 #define SR_PORT_NAME       L"\\SpaceRecycleDeletePort"
 #define SR_SERVICE_NAME    L"SpaceRecycleGuard"
@@ -164,6 +165,79 @@ static void OpenLog() {
     gLog = CreateFileW(path.c_str(), FILE_APPEND_DATA,
                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+
+/// Creates the policy file if it is missing and makes it writable by the person
+/// using the machine.
+///
+/// The service runs as LocalSystem, so a file it creates belongs to SYSTEM and
+/// the settings screen - which runs as the logged-in user, unelevated - could
+/// not write to it. Somebody has to widen the ACL and the service is the only
+/// component that can: an installer would work too, but then the file would be
+/// unusable until an installer had been run as administrator, and the whole
+/// point of the settings screen is to be reachable without that.
+///
+/// The tradeoff is deliberate and worth stating plainly: any local user can
+/// weaken the protection by choosing "allow". That is consistent with what this
+/// feature is - it guards against deleting the wrong thing by accident, not
+/// against a user determined to delete it, the same honesty the filter's own
+/// comments carry. On a machine where that is not acceptable, tighten this ACL
+/// to Administrators and drop the setting from the screen.
+static void EnsurePolicyFile() {
+    if (gPolicyPath.empty()) {
+        return;
+    }
+
+    HANDLE handle = CreateFileW(gPolicyPath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER zero;
+        zero.QuadPart = 0;
+        // Seed a brand new file so it explains itself when opened by hand, and
+        // so the service has something valid to read on the very first run.
+        if (GetFileSizeEx(handle, &zero) && zero.QuadPart == 0) {
+            const char* seed =
+                "# SpaceRecycle delete guard policy.\r\n"
+                "# action_marked: ask | deny | allow\r\n"
+                "action_marked=ask\r\n"
+                "action_unmarked=allow\r\n";
+            DWORD written = 0;
+            WriteFile(handle, seed, (DWORD)strlen(seed), &written, nullptr);
+        }
+        CloseHandle(handle);
+    }
+
+    EXPLICIT_ACCESSW entries[2];
+    ZeroMemory(entries, sizeof(entries));
+
+    entries[0].grfAccessPermissions = GENERIC_ALL;
+    entries[0].grfAccessMode = SET_ACCESS;
+    entries[0].grfInheritance = NO_INHERITANCE;
+    entries[0].Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+    entries[0].Trustee.TrusteeType = TRUSTEE_IS_USER;
+    entries[0].Trustee.ptstrName = (LPWSTR)L"SYSTEM";
+
+    entries[1].grfAccessPermissions = GENERIC_READ | GENERIC_WRITE | DELETE;
+    entries[1].grfAccessMode = SET_ACCESS;
+    entries[1].grfInheritance = NO_INHERITANCE;
+    entries[1].Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+    entries[1].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    entries[1].Trustee.ptstrName = (LPWSTR)L"BUILTIN\\Users";
+
+    PACL acl = nullptr;
+    if (SetEntriesInAclW(2, entries, nullptr, &acl) == ERROR_SUCCESS) {
+        DWORD rc = SetNamedSecurityInfoW((LPWSTR)gPolicyPath.c_str(), SE_FILE_OBJECT,
+                                         DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                                         acl, nullptr);
+        if (rc != ERROR_SUCCESS) {
+            Log("could not widen the policy file ACL (rc=%lu); the settings screen may not be able to save",
+                rc);
+        }
+        LocalFree(acl);
+    } else {
+        Log("could not build the policy file ACL");
+    }
 }
 
 /* --------------------------------------------------------------- path + ADS */
@@ -567,6 +641,9 @@ static bool ConnectToFilter(bool forPolicy) {
 static DWORD WINAPI GuardLoop(LPVOID) {
     gGuardThreadId = GetCurrentThreadId();
     OpenLog();
+    // Before anything reads the policy: create it if it is missing and make it
+    // writable by the interactive user, so the settings screen can save.
+    EnsurePolicyFile();
     Log("guard starting (pid %lu, prompt=%s)", GetCurrentProcessId(),
         gNoPrompt ? "off" : "on");
 
