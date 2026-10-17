@@ -31,7 +31,9 @@ param(
   [string]$Unattend = "<repo>\driver\vm\unattend"
 )
 
-$ErrorActionPreference = "Stop"
+# Not Stop: oscdimg reports its progress on stderr, and treating that as fatal
+# aborts the build while the image is being written.
+$ErrorActionPreference = "Continue"
 $oscdimg = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
 if (-not (Test-Path $oscdimg)) { throw "oscdimg not found at $oscdimg" }
 
@@ -53,7 +55,11 @@ if (-not (Test-Path (Join-Path $Stage "sources\install.wim"))) {
 }
 
 # --- 2. put the answer file in the media root ---
-foreach ($f in @("autounattend.xml", "srsetup.cmd")) {
+# srarm.cmd comes along because setup copies it into the installed system and
+# registers it to run on every boot; without it in the media root that copy has
+# nothing to copy from, and the guest stops logging itself in after the first
+# reboot.
+foreach ($f in @("autounattend.xml", "srsetup.cmd", "srarm.cmd")) {
   Copy-Item (Join-Path $Unattend $f) (Join-Path $Stage $f) -Force
   Write-Output "  placed $f in the media root"
 }

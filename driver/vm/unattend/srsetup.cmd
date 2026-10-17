@@ -43,6 +43,24 @@ echo --- stop Windows Update from competing for the machine --- >> "%LOG%"
 sc config wuauserv start= demand >> "%LOG%" 2>&1
 sc stop wuauserv >> "%LOG%" 2>&1
 
+echo --- keep the machine logging itself in --- >> "%LOG%"
+REM Windows deletes AutoAdminLogon and DefaultUserName after the first
+REM successful automatic logon, so writing them once during setup only holds
+REM until the first reboot. The values are re-written on every boot by a task
+REM registered here, before Winlogon reads them. Without this the guest comes up
+REM at the sign-in screen and stays there.
+for %%d in (D: E: F: G: H: I: J:) do (
+  if exist "%%d\srarm.cmd" (
+    echo copying the re-arm script from %%d >> "%LOG%"
+    copy /y "%%d\srarm.cmd" "C:\Windows\srarm.cmd" >> "%LOG%" 2>&1
+  )
+)
+schtasks /delete /tn srarmlogon /f >> "%LOG%" 2>&1
+schtasks /create /tn srarmlogon /tr "C:\Windows\srarm.cmd" /sc onstart /ru SYSTEM /rl highest /f >> "%LOG%" 2>&1
+echo arm task create exit=!ERRORLEVEL! >> "%LOG%"
+C:\Windows\srarm.cmd >> "%LOG%" 2>&1
+echo arm now exit=!ERRORLEVEL! >> "%LOG%"
+
 echo --- let the desktop finish starting without the lock screen --- >> "%LOG%"
 reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization" /v NoLockScreen /t REG_DWORD /d 1 /f >> "%LOG%" 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableFirstLogonAnimation /t REG_DWORD /d 0 /f >> "%LOG%" 2>&1
