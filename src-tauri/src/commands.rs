@@ -773,6 +773,9 @@ pub async fn set_importance(
 /// lapsed subscriber would be left holding files they could no longer act on,
 /// with no way to release them - the gate would be holding their own data
 /// hostage to a renewal.
+///
+/// It also releases the external guard, for the same reason: clearing the mark
+/// is the user saying this file is theirs to act on again.
 #[tauri::command]
 pub async fn clear_importance(path: String) -> Result<(), String> {
     offload(move || {
@@ -781,6 +784,18 @@ pub async fn clear_importance(path: String) -> Result<(), String> {
         store.save().map_err(|e| format!("无法保存重要级别：{e}"))
     })
     .await
+}
+
+/// Which mechanism is protecting marked files on this machine.
+///
+/// The settings screen needs this because "protected" has more than one
+/// meaning here - a kernel filter that can prompt, or nothing at all - and a
+/// screen that showed only "protected" would be describing different products
+/// with one word. It currently reports that nothing is available, which is the
+/// truth: see the note at the top of `protection.rs`.
+#[tauri::command]
+pub async fn protection_status() -> crate::protection::Status {
+    offload(crate::protection::status).await
 }
 
 /// The delete guard's disposition, plus whether it is actually running.

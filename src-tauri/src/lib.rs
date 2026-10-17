@@ -7,6 +7,7 @@ pub mod importance;
 pub mod license;
 pub mod log;
 pub mod model;
+pub mod protection;
 pub mod quarantine;
 pub mod safety;
 pub mod scanner;
@@ -90,6 +91,7 @@ pub fn run() {
             commands::set_importance,
             commands::clear_importance,
             commands::guard_status,
+            commands::protection_status,
             commands::set_guard_disposition,
             commands::onedrive_status,
             commands::get_entitlement,

@@ -67,6 +67,23 @@ impl Importance {
     pub fn allows_purge(&self) -> bool {
         !matches!(self, Importance::Critical | Importance::High)
     }
+
+    /// Whether a mark at this level should make the file undeletable for
+    /// everything on the machine, not only for this app's own cleanup.
+    ///
+    /// Only `Critical`, and the choice is deliberate rather than an oversight.
+    /// `Critical` already refuses every action this program can take, so
+    /// arming it changes nothing about what the app does - it only adds
+    /// protection against everything else. `High` still permits quarantine and
+    /// cloud backup, and a deny entry blocks the move into the quarantine store
+    /// as well, so arming it would quietly remove a choice the user has today.
+    /// Widening this is a product decision, not a bug fix.
+    ///
+    /// When the four levels collapse to the two the product actually wants -
+    /// 重要 and 可清理 - this is the 重要 side.
+    pub fn protects_externally(&self) -> bool {
+        matches!(self, Importance::Critical)
+    }
 }
 
 /// One stored mark.

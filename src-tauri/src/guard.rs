@@ -178,6 +178,27 @@ pub fn status() -> Status {
     }
 }
 
+/// Whether the kernel filter is in a position to protect anything.
+///
+/// The strongest signal this process has, and worth being precise about what it
+/// is: the *service* is running. The service is what holds the connection to
+/// the filter's port, and it is the only component that can see whether the
+/// driver answered - this process cannot, and a running service with no driver
+/// loaded looks identical from here.
+///
+/// That gap matters to the caller: `protection::current` prefers the driver
+/// whenever this is true, so a machine running the service without the driver
+/// would get neither mechanism. It is still the right default, because the
+/// alternative - arming the ACL as well - would break the driver's own flow:
+/// a deny entry fails the access check before the filter is ever asked, so the
+/// user would get a raw "access denied" instead of the prompt they chose.
+///
+/// The honest fix is for the service to publish whether the filter answered,
+/// and it is what the guard card already tells the user it cannot see.
+pub fn driver_is_active() -> bool {
+    matches!(service_state(), (_, true))
+}
+
 #[cfg(windows)]
 fn service_state() -> (bool, bool) {
     use windows::core::PCWSTR;
