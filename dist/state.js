@@ -36,15 +36,15 @@ const state = {
   marks: new Map(),         // normalized path -> "critical" | "high" | "normal" | "low"
   importanceFilter: "all",  // "all" | level, for the findings toolbar
   menu: null,               // { path, name, level, x, y } right-click menu anchor
-  onedrive: null,           // { available, roots } from the backend, null until asked
   entitlement: null,        // subscription state, loaded when Settings opens
   guard: null,              // delete-guard disposition + whether it is running
   /**
    * OneDrive account + cloud quota.
    *
-   * `null` until asked; `{ connected, quota, detail }` afterwards. Kept
-   * separate from `onedrive` (the local Files On-Demand roots), because the
-   * local release feature works with no account at all.
+   * `null` until asked; `{ connected, quota, detail }` afterwards. This is the
+   * account the app itself is linked to, and it is what the OneDrive
+   * quarantine target needs: nothing is uploaded anywhere the user has not
+   * signed in to.
    */
   onedriveAccount: null,
   /** A sign-in in progress: { userCode, verificationUri, intervalSecs, status, detail }. */
@@ -400,25 +400,7 @@ export const actions = {
     // reached without ever opening it, and a badge that only appears after a
     // second visit would look like the save had failed.
     await actions.loadImportance();
-    await actions.loadOnedrive();
     render();
-  },
-
-  /**
-   * Whether OneDrive is present on this machine.
-   *
-   * Cheap enough to call on every overview load: the backend only reads
-   * environment variables and stats the result. The byte counts come from the
-   * scan, not from here.
-   */
-  async loadOnedrive() {
-    try {
-      state.onedrive = await invoke("onedrive_status");
-    } catch (_) {
-      // A machine without OneDrive is the normal case, not an error worth a
-      // toast. Hide the card and move on.
-      state.onedrive = { available: false, roots: [] };
-    }
   },
 
   /**
@@ -1119,6 +1101,31 @@ export const actions = {
       // auto-dismiss timer, so the confirmation never went away.
       toast(t(state.lang, "toast.saved"), "ok");
     } catch (e) {
+      toast(t(state.lang, "toast.saveFail", { e }), "err");
+    }
+  },
+
+  /// Choose whether quarantined items stay on this disk or go to OneDrive.
+  ///
+  /// Saved on change rather than through the Save button, for the same reason
+  /// as the guard disposition: this decides where the *next* cleanup puts an
+  /// item, and a choice that only takes effect after a second button is a
+  /// choice a user can walk away from without having made.
+  async setQuarantineTarget(target) {
+    const previous = state.config;
+    if (previous) state.config = Object.assign({}, previous, { quarantineTarget: target });
+    render();
+    try {
+      await invoke("save_config", { cfg: state.config });
+      // Re-read rather than trusting the local copy: serde fills in any field
+      // the frontend did not know about, and a stale local object would drop
+      // it on the next save.
+      state.config = await invoke("get_config");
+      render();
+      toast(t(state.lang, "set.q.saved"), "ok");
+    } catch (e) {
+      state.config = previous;
+      render();
       toast(t(state.lang, "toast.saveFail", { e }), "err");
     }
   },

@@ -294,8 +294,6 @@ function overviewView() {
 
     ${bigFileRollup()}
 
-    ${onedriveCard()}
-
     <h2 class="section mt">${T("ov.cleanup")}</h2>
     <div class="card">
       <div class="toolbar" style="margin-bottom:0">
@@ -313,40 +311,6 @@ function overviewView() {
 
 function riskOf(cat) {
   return { temp_junk: "safe", system_cache: "safe", dev_artifact: "rebuildable", large_file: "personal", app_leftover: "userdata", cloud_placeholder: "cloud" }[cat];
-}
-
-/**
- * OneDrive card.
- *
- * Rendered only when the backend actually found a sync root: a cloud section
- * on a machine without OneDrive is clutter that also promises a feature which
- * cannot do anything. The byte counts come from the scan, because measuring an
- * OneDrive tree is a full walk and must not happen just to draw a card.
- */
-function onedriveCard() {
-  const od = state.onedrive;
-  if (!od || !od.available) return "";
-  const cloud = state.findings.filter(f => f.category === "cloud_placeholder");
-  const reclaimable = cloud.reduce((s, f) => s + f.onDiskSize, 0);
-  const files = cloud.reduce((s, f) => s + (f.childCount || 0), 0);
-  return h`
-    <h2 class="section mt">${T("od.title")}</h2>
-    <div class="card">
-      <div class="od-roots">
-        <span class="dot purple"></span>
-        <span class="faint" style="font-size:12px">${esc(od.roots.join("  ·  "))}</span>
-      </div>
-      <div class="toolbar" style="margin:12px 0 0">
-        <button data-act="scan" data-cats="cloud_placeholder" ${state.scanning ? "disabled" : ""}>${T("od.scan")}</button>
-        ${cloud.length
-          ? `<span class="faint" style="font-size:12px">${T("od.summary", {
-              folders: cloud.length,
-              files: files,
-              size: fmtBytes(reclaimable),
-            })}</span>`
-          : `<span class="faint" style="font-size:12px">${T("od.hint")}</span>`}
-      </div>
-    </div>`;
 }
 
 /**
@@ -965,6 +929,57 @@ function guardCard() {
     </div>`;
 }
 
+/**
+ * Where quarantined items are kept: this disk, or the user's OneDrive.
+ *
+ * The cloud option is a subscriber feature and also needs a linked account, so
+ * it is rendered disabled with the reason rather than hidden. A setting that
+ * silently disappears cannot be discovered, and a user who is paying for it
+ * and cannot find it has no way to tell that apart from a bug.
+ *
+ * The local path is always shown, even when OneDrive is selected, because it is
+ * still where an upload that fails ends up: the engine falls back to it rather
+ * than dropping the item.
+ */
+function quarantineCard() {
+  const c = state.config || {};
+  const target = c.quarantineTarget === "onedrive" ? "onedrive" : "local";
+  const subscriber = !!(state.entitlement && state.entitlement.subscriber);
+  const linked = !!(state.onedriveAccount && state.onedriveAccount.connected);
+  const cloudReady = subscriber && linked;
+
+  const option = (value, labelKey, hintKey, enabled) => {
+    const on = target === value;
+    return h`
+      <label class="guardopt${on ? " on" : ""}">
+        <input type="radio" name="q-target" value="${value}" data-act="qtarget"
+               ${on ? "checked" : ""} ${enabled ? "" : "disabled"} />
+        <span>
+          <span class="setlabel">${T(labelKey)}</span>
+          <span class="faint guardhint">${T(hintKey)}</span>
+        </span>
+      </label>`;
+  };
+
+  // Which of the two reasons applies, spelled out rather than left as one
+  // generic "unavailable": they call for different actions from the user.
+  let why = "";
+  if (!subscriber) why = T("set.q.needsSub");
+  else if (!linked) why = T("set.q.needsAccount");
+
+  return h`
+    <h2 class="section">${T("set.location")}</h2>
+    <div class="card mb">
+      <div class="faint" style="font-size:11px">${T("set.locationHint")}</div>
+      <div class="guardopts">
+        ${option("local", "set.q.local", "set.q.localHint", true)}
+        ${option("onedrive", "set.q.oneDrive", "set.q.oneDriveHint", cloudReady)}
+      </div>
+      <div class="mono faint mt" style="font-size:11px;word-break:break-all">${esc(c.quarantineDir || "")}</div>
+      ${target === "onedrive" && !cloudReady ? h`<div class="guardstatus warn">${why}</div>` : ""}
+    </div>`;
+}
+
 function settingsView() {
   const c = state.config || {};
   const log = state.auditLog || [];
@@ -1022,13 +1037,7 @@ function settingsView() {
 
     ${accountCard()}
 
-    <h2 class="section">${T("set.location")}</h2>
-    <div class="card mb">
-      <div class="mono faint" style="font-size:11px;word-break:break-all">${esc(c.quarantineDir || "")}</div>
-      <div class="faint mt" style="font-size:11px">
-        ${T("set.locationHint")}
-      </div>
-    </div>
+    ${quarantineCard()}
 
     <h2 class="section">${T("set.log")} <span class="hint">${T("set.logHint")}</span></h2>
     <div class="card">
@@ -1150,6 +1159,10 @@ function bind() {
     else if (act === "red-confirm") actions.setRedConfirm(t.checked);
     else if (act === "lang") actions.setLang(t.value);
     else if (act === "guard") actions.setGuardDisposition(t.value);
+    else if (act === "qtarget") {
+      if (t.disabled) return;
+      actions.setQuarantineTarget(t.value);
+    }
     // "sel" and "cat-sel" are deliberately absent: they are checkboxes, and
     // the click listener already handles them. Handling both made every tick
     // fire twice - on, then off again - so a row could not be selected at all.

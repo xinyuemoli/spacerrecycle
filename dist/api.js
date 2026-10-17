@@ -30,15 +30,24 @@ const stubGuard = {
   configured: false,
 };
 
+// Settings are kept the same way as the guard disposition above: the stub
+// remembers what was saved so the quarantine-target choice survives a re-render
+// when the UI is opened without a backend.
+let stubConfig = {
+  largeFileAgeDays: 30, leftoverAgeDays: 30,
+  largeFileMinBytes: 524288000, quarantineExpiryDays: 7,
+  quarantineDir: "C:\\ProgramData\\SpaceRecycle\\Quarantine",
+  quarantineTarget: "local",
+  extraExcludedRoots: [],
+};
+
 function stub(cmd, args) {
   switch (cmd) {
     case "get_volumes": return [];
-    case "get_config": return {
-      largeFileAgeDays: 30, leftoverAgeDays: 30,
-      largeFileMinBytes: 524288000, quarantineExpiryDays: 7,
-      quarantineDir: "C:\\ProgramData\\SpaceRecycle\\Quarantine",
-      extraExcludedRoots: [],
-    };
+    case "get_config": return Object.assign({}, stubConfig);
+    case "save_config":
+      stubConfig = Object.assign({}, stubConfig, (args && args.cfg) || {});
+      return null;
     case "quarantine_expiry":
       return { expiryDays: 7, expiredBatches: [], expiredItems: 0, expiredOnDiskBytes: 0 };
     case "list_quarantine_batches": return [];

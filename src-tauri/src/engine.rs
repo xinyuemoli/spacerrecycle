@@ -101,12 +101,7 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
     let mut groups: BTreeMap<&str, (usize, u64, u64, BTreeMap<String, usize>, bool)> = BTreeMap::new();
 
     for it in items {
-        let key = match it.disposition {
-            Disposition::Purge => "purge",
-            Disposition::Quarantine => "quarantine",
-            Disposition::Dehydrate => "dehydrate",
-            Disposition::CloudBackup => "cloud_backup",
-        };
+        let key = it.disposition.key();
         let e = groups.entry(key).or_insert((0, 0, 0, BTreeMap::new(), false));
         e.0 += 1;
         e.1 += it.finding.logical_size;
@@ -270,6 +265,32 @@ pub fn run_cleanup_full(
             Disposition::Dehydrate => to_dehydrate.push(item),
             Disposition::CloudBackup => to_backup.push(item),
         }
+    }
+
+    // Where "quarantine" puts an item is a user setting, and when it is set to
+    // OneDrive the items move into the backup pass rather than getting an
+    // uploader of their own. That is deliberate: the backup pass already
+    // implements the invariant that matters here - upload first, remove the
+    // local copy only once the upload is confirmed, and hand anything that
+    // fails to the quarantine pass - and a second implementation beside it
+    // would be a second place for that to be wrong.
+    //
+    // Only categories that are meaningful in the cloud are moved. Temp junk and
+    // caches stay in the local quarantine even then: the user chose to retain
+    // them, but spending their cloud quota on files the product considers
+    // garbage is not what "quarantine to OneDrive" should mean, and the
+    // existing category check refuses them anyway - moving them would turn a
+    // working local quarantine into a blocked item.
+    if cfg.quarantine_target == crate::config::QuarantineTarget::OneDrive {
+        let mut stay_local: Vec<&SelectedItem> = Vec::new();
+        for item in to_quarantine.drain(..) {
+            if item.finding.category.allows_cloud_backup() {
+                to_backup.push(item);
+            } else {
+                stay_local.push(item);
+            }
+        }
+        to_quarantine = stay_local;
     }
 
     // Red-tagged items headed for permanent deletion need explicit consent.
@@ -1268,6 +1289,158 @@ mod tests {
             report.failed.is_empty(),
             "a handled fallback must not also be reported as a failure"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------- quarantine destination
+
+    /// With the quarantine target set to OneDrive, an item whose disposition is
+    /// plain `Quarantine` goes up to the cloud and its local copy is removed -
+    /// through the same upload-then-remove pass as an explicit cloud backup,
+    /// not through a second uploader.
+    #[test]
+    fn a_cloud_quarantine_target_uploads_and_removes_the_local_copy() {
+        let (dir, mut cfg) = scratch("qtarget-cloud");
+        cfg.quarantine_target = crate::config::QuarantineTarget::OneDrive;
+        let target = dir.join("project");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.txt"), b"data").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext {
+            subscriber: true,
+            sink: Some(&sink),
+            batch_id: "batch-1".to_string(),
+        };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::Quarantine)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert_eq!(report.backed_up.len(), 1, "the item was not sent to OneDrive");
+        assert!(report.quarantined.is_empty(), "it was ALSO put in local quarantine");
+        assert!(!target.exists(), "the local copy survived a confirmed upload");
+        assert_eq!(
+            sink.existed_at_upload.lock().unwrap().as_slice(),
+            &[true],
+            "the file was gone before the upload started"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default must be untouched: with no setting changed, quarantine is
+    /// still a local move and no network call is made at all.
+    #[test]
+    fn a_local_quarantine_target_moves_the_file_and_uploads_nothing() {
+        let (dir, cfg) = scratch("qtarget-local");
+        assert_eq!(cfg.quarantine_target, crate::config::QuarantineTarget::Local);
+        let target = dir.join("project");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.txt"), b"data").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext {
+            subscriber: true,
+            sink: Some(&sink),
+            batch_id: "batch-1".to_string(),
+        };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::Quarantine)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert_eq!(report.quarantined.len(), 1, "the item was not quarantined");
+        assert!(
+            sink.calls().is_empty(),
+            "a local quarantine made a network call"
+        );
+        assert!(!target.exists(), "the item did not move");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Temp junk stays local even with a cloud target. The user asked for it to
+    /// be *retained*, and retaining is what quarantine means - but spending
+    /// their cloud quota on files the product treats as garbage is not what
+    /// "quarantine to OneDrive" should mean. It must still be quarantined, not
+    /// blocked: the whole point of the fallback is that the space comes back.
+    #[test]
+    fn garbage_is_quarantined_locally_rather_than_uploaded_or_blocked() {
+        let (dir, mut cfg) = scratch("qtarget-garbage");
+        cfg.quarantine_target = crate::config::QuarantineTarget::OneDrive;
+        let target = dir.join("junk");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.tmp"), b"junk").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext {
+            subscriber: true,
+            sink: Some(&sink),
+            batch_id: "batch-1".to_string(),
+        };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::TempJunk, Disposition::Quarantine)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert_eq!(report.quarantined.len(), 1, "the item was not quarantined");
+        assert!(report.blocked.is_empty(), "it was blocked instead of moved");
+        assert!(sink.calls().is_empty(), "garbage was uploaded to the cloud");
+        assert!(!target.exists(), "the item did not move");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cloud target with no subscription must not remove anything. The UI
+    /// disables the option, but the engine has to hold on its own.
+    #[test]
+    fn a_cloud_quarantine_target_without_a_subscription_removes_nothing() {
+        let (dir, mut cfg) = scratch("qtarget-gate");
+        cfg.quarantine_target = crate::config::QuarantineTarget::OneDrive;
+        let target = dir.join("project");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.txt"), b"data").unwrap();
+        let path = target.to_string_lossy().to_string();
+
+        let sink = FakeSink::ok();
+        let cloud = CloudContext {
+            subscriber: false,
+            sink: Some(&sink),
+            batch_id: "batch-1".to_string(),
+        };
+        let report = run_cleanup_full(
+            CleanupRequest {
+                items: vec![item(&path, Category::DevArtifact, Disposition::Quarantine)],
+                confirmed_red_purge: false,
+            },
+            &cfg,
+            &crate::importance::Store::default(),
+            &cloud,
+        );
+
+        assert!(target.exists(), "the file was removed without a subscription");
+        assert!(sink.calls().is_empty(), "an upload was attempted anyway");
+        assert_eq!(report.blocked.len(), 1, "the refusal was not reported");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1,6 +1,36 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Where a quarantined item is put.
+///
+/// This is a user setting rather than a per-item choice because it answers
+/// "where do I keep the things I might want back", and that is a property of
+/// the person, not of the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuarantineTarget {
+    /// The local quarantine folder. The default, and the only option that works
+    /// with no account, no subscription and no network.
+    #[default]
+    Local,
+    /// The user's own OneDrive, through the linked account.
+    ///
+    /// The file is uploaded first and the local copy is removed only once the
+    /// upload is confirmed, so this frees local space while keeping the item
+    /// restorable. It is a subscriber feature and is refused in the engine, not
+    /// only in the UI.
+    OneDrive,
+}
+
+impl QuarantineTarget {
+    pub fn key(&self) -> &'static str {
+        match self {
+            QuarantineTarget::Local => "local",
+            QuarantineTarget::OneDrive => "onedrive",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
@@ -12,8 +42,12 @@ pub struct Config {
     pub large_file_min_bytes: u64,
     /// Age at which quarantined items are flagged as expired.
     pub quarantine_expiry_days: u32,
-    /// Where quarantined data lives.
+    /// Where quarantined data lives, when the target is local.
     pub quarantine_dir: PathBuf,
+    /// Whether quarantined items stay on this disk or go to the user's
+    /// OneDrive. `quarantine_dir` is used for the local case and ignored for
+    /// the cloud one.
+    pub quarantine_target: QuarantineTarget,
     /// Roots to exclude from every scan, in addition to the built-in denylist.
     pub extra_excluded_roots: Vec<PathBuf>,
     /// Store ID of the subscription add-on that unlocks cloud backup.
@@ -41,6 +75,7 @@ impl Default for Config {
             large_file_min_bytes: 500 * 1024 * 1024,
             quarantine_expiry_days: 7,
             quarantine_dir: default_quarantine_dir(),
+            quarantine_target: QuarantineTarget::Local,
             extra_excluded_roots: Vec::new(),
             subscription_addon_store_id: String::new(),
             dev_subscriber_override: false,

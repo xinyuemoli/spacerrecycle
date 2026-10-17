@@ -134,23 +134,23 @@ st.actions.toggleSel("c1");
 check("a cloud row can be ticked", S.selected.has("c1"));
 S.selected.clear();
 
-// ---------- the OneDrive card ----------
-
-S.onedrive = { available: true, roots: ["C:\\Users\\me\\OneDrive"] };
+// ---------- the OneDrive scan card is gone ----------
+//
+// The overview used to carry a card that scanned OneDrive's Files On-Demand
+// placeholders and offered to release them. That answers "what is OneDrive
+// costing me locally", which is not the question this product is asked: the
+// choice the user makes is *where quarantined files are kept*, and it lives in
+// Settings. The card was removed, and this holds that - a render that quietly
+// brought it back would put a second, unrelated meaning on the word "OneDrive"
+// in the same window.
 S.tab = "overview";
 S.volumes = [];
 await ui.render();
-check("the OneDrive card appears when a root exists", doc().includes("OneDrive"));
-check("the card names the sync root", doc().includes("C:\\Users\\me\\OneDrive"));
-check("the card offers a scan", doc().includes('data-cats="cloud_placeholder"'));
-
-S.onedrive = { available: false, roots: [] };
-await ui.render();
-check("the card is hidden without OneDrive", !doc().includes("扫描 OneDrive 本地占用"));
+check("the overview no longer offers a OneDrive scan", !doc().includes('data-cats="cloud_placeholder"'));
+check("the overview no longer names a sync root", !doc().includes("C:\\Users\\me\\OneDrive"));
 
 // ---------- the preview ----------
 
-S.onedrive = { available: true, roots: ["C:\\Users\\me\\OneDrive"] };
 S.tab = "findings";
 S.preview = {
   groups: [{ disposition: "dehydrate", itemCount: 1, logicalBytes: 8e9, onDiskBytes: 8e9, categoryCounts: { cloud_placeholder: 1 }, containsRedPurge: false }],
