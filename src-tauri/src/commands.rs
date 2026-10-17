@@ -480,7 +480,7 @@ pub async fn run_cleanup(
             now: crate::license::now_unix(),
         };
         let cloud = crate::engine::CloudContext {
-            subscriber: entitlement.cloud_backup_allowed(),
+            subscriber: entitlement.cloud_allowed(),
             sink: Some(&sink),
             batch_id: String::new(),
         };
@@ -721,14 +721,14 @@ pub async fn onedrive_status() -> crate::cloud::onedrive::Status {
 
 /// Current subscription state for the cloud-backup feature.
 #[tauri::command]
-pub async fn get_entitlement() -> crate::license::Entitlement {
-    offload(crate::license::entitlement).await
+pub async fn get_entitlement() -> crate::license::EntitlementView {
+    offload(|| crate::license::entitlement().view()).await
 }
 
 /// Re-check the subscription, ignoring a fresh cached answer.
 #[tauri::command]
-pub async fn refresh_entitlement() -> crate::license::Entitlement {
-    offload(crate::license::entitlement_forced).await
+pub async fn refresh_entitlement() -> crate::license::EntitlementView {
+    offload(|| crate::license::entitlement_forced().view()).await
 }
 
 /// Every importance mark the user has set, most important first.
@@ -742,12 +742,22 @@ pub async fn list_importance() -> Vec<crate::importance::Entry> {
 }
 
 /// Set or replace the importance level of one path.
+///
+/// Gated, and the gate is on the *write* rather than on the menu that offers
+/// it. A mark is what makes the cleanup pipeline refuse to act on a path, so
+/// accepting one from a user who has not paid would hand them the protection
+/// for free - hiding the menu button would be decoration, not a gate.
 #[tauri::command]
 pub async fn set_importance(
     path: String,
     level: crate::importance::Importance,
 ) -> Result<(), String> {
     offload(move || {
+        // The entitlement probe can block on the Store, which is why it lives
+        // inside offload rather than in the async body.
+        if !crate::license::entitlement().importance_allowed() {
+            return Err("重要级别标记需要有效订阅".to_string());
+        }
         let mut store = crate::importance::Store::load();
         store.set(std::path::Path::new(&path), level);
         store.save().map_err(|e| format!("无法保存重要级别：{e}"))
@@ -756,6 +766,13 @@ pub async fn set_importance(
 }
 
 /// Clear the importance mark of one path.
+///
+/// Deliberately **not** gated. A mark that was made while subscribed outlives
+/// the subscription, and the cleanup pipeline refuses to touch a marked path
+/// whether or not anyone is still paying. If clearing were behind the gate, a
+/// lapsed subscriber would be left holding files they could no longer act on,
+/// with no way to release them - the gate would be holding their own data
+/// hostage to a renewal.
 #[tauri::command]
 pub async fn clear_importance(path: String) -> Result<(), String> {
     offload(move || {
@@ -783,8 +800,19 @@ pub async fn guard_status() -> crate::guard::Status {
 /// Written to the service's policy file rather than applied here: the service
 /// owns the file, watches it, and pushes the value into the kernel filter, so a
 /// change lands within a couple of seconds and survives a reboot.
+///
+/// Turning protection **on** is gated; turning it **off** never is. The
+/// asymmetry is the same one as `clear_importance`: a lapsed subscriber must
+/// always be able to stand the guard down, and blocking that would leave them
+/// unable to delete their own files.
 #[tauri::command]
 pub async fn set_guard_disposition(disposition: crate::guard::Disposition) -> Result<(), String> {
-    offload(move || crate::guard::write(disposition).map_err(|e| format!("无法写入守护策略：{e}")))
-        .await
+    offload(move || {
+        let stands_down = disposition == crate::guard::Disposition::Allow;
+        if !stands_down && !crate::license::entitlement().guard_allowed() {
+            return Err("删除防护需要有效订阅".to_string());
+        }
+        crate::guard::write(disposition).map_err(|e| format!("无法写入守护策略：{e}"))
+    })
+    .await
 }

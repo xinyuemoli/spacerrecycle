@@ -75,10 +75,77 @@ pub struct Entitlement {
 }
 
 impl Entitlement {
-    /// Whether the subscriber-only cloud backup may be offered.
-    pub fn cloud_backup_allowed(&self) -> bool {
+    /// Whether the paid feature set is open.
+    ///
+    /// **One subscription opens all of it.** The tier is not sold per feature,
+    /// so there is one answer here and three names below rather than three
+    /// independent flags. The names exist for the call sites: they read as
+    /// "may I do this thing", and if the tier is ever split, each one can gain
+    /// its own source without any call site changing.
+    ///
+    /// `NotConfigured` counts as open, and that is deliberate. It means no
+    /// subscription add-on exists yet, so there is nothing on sale and nothing
+    /// to gate. Treating it as closed - which is what this code did - ships a
+    /// build whose advertised paid features are dead for everyone, including
+    /// people who would have paid. The moment `subscriptionAddonStoreId` is
+    /// filled in, this flips and the gate becomes real.
+    pub fn paid_features_open(&self) -> bool {
+        self.subscriber || matches!(self.source, EntitlementSource::NotConfigured)
+    }
+
+    /// Cloud backup and OneDrive quarantine, plus the quota display.
+    pub fn cloud_allowed(&self) -> bool {
+        self.paid_features_open()
+    }
+
+    /// Right-click importance marks and the icon overlays that show them.
+    pub fn importance_allowed(&self) -> bool {
+        self.paid_features_open()
+    }
+
+    /// The delete-guard: the minifilter and its resident service.
+    pub fn guard_allowed(&self) -> bool {
+        self.paid_features_open()
+    }
+
+    /// Whether the user is actually paying.
+    ///
+    /// Distinct from the three above, and the difference is the whole point:
+    /// "the feature is open" and "the user bought it" are not the same claim.
+    /// Settings shows this one, so a build with nothing on sale does not tell
+    /// the user they are subscribed.
+    pub fn is_subscriber(&self) -> bool {
         self.subscriber
     }
+
+    /// The form the frontend receives.
+    ///
+    /// A separate type rather than three fields on `Entitlement`, because they
+    /// are derived: storing them would be a second place the rule is written
+    /// down, which is the failure mode the rest of this change exists to
+    /// remove. The frontend cannot call a method across IPC, so the answer has
+    /// to be computed here and sent.
+    pub fn view(&self) -> EntitlementView {
+        EntitlementView {
+            entitlement: self.clone(),
+            cloud_allowed: self.cloud_allowed(),
+            importance_allowed: self.importance_allowed(),
+            guard_allowed: self.guard_allowed(),
+        }
+    }
+}
+
+/// [`Entitlement`] plus the resolved feature flags, for the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitlementView {
+    #[serde(flatten)]
+    pub entitlement: Entitlement,
+    /// One subscription opens all three; they are separate names for one fact,
+    /// and sending all three keeps the frontend from re-deriving the rule.
+    pub cloud_allowed: bool,
+    pub importance_allowed: bool,
+    pub guard_allowed: bool,
 }
 
 /// The Store's answer, normalised away from WinRT types.
@@ -435,7 +502,91 @@ mod tests {
         let e = evaluate(1_000, StoreAnswer::Active { expires_unix: None }, None);
         assert!(e.subscriber);
         assert_eq!(e.source, EntitlementSource::Store);
-        assert!(e.cloud_backup_allowed());
+        assert!(e.cloud_allowed());
+    }
+
+    // -------------------------------------------- the tier
+
+    /// One subscription opens every paid feature. The three checks are one
+    /// fact with three names, and a build where they disagree would be a build
+    /// where the tier had been split without anyone saying so.
+    #[test]
+    fn one_subscription_opens_all_of_the_paid_features() {
+        let e = evaluate(1_000, StoreAnswer::Active { expires_unix: None }, None);
+        assert!(e.cloud_allowed());
+        assert!(e.importance_allowed());
+        assert!(e.guard_allowed());
+
+        let off = evaluate(1_000, StoreAnswer::Inactive, None);
+        assert!(!off.cloud_allowed());
+        assert!(!off.importance_allowed());
+        assert!(!off.guard_allowed());
+    }
+
+    /// A build with no add-on configured has nothing on sale, so nothing is
+    /// gated. The alternative - what this code did - ships a build whose
+    /// advertised paid features are dead for everyone, including people who
+    /// would have paid.
+    #[test]
+    fn an_unconfigured_build_leaves_the_paid_features_open() {
+        let cfg = crate::config::Config::default();
+        assert!(cfg.subscription_addon_store_id.is_empty());
+        let e = entitlement_with(&cfg, 1_000, |_| panic!("must not ask the Store when unconfigured"));
+
+        assert!(!e.subscriber, "nobody is paying before anything is on sale");
+        assert_eq!(e.source, EntitlementSource::NotConfigured);
+        assert!(e.cloud_allowed(), "a feature that cannot be bought was locked");
+        assert!(e.importance_allowed());
+        assert!(e.guard_allowed());
+    }
+
+    /// "The feature is open" and "the user bought it" are different claims, and
+    /// Settings must not conflate them.
+    #[test]
+    fn being_open_is_not_the_same_as_being_subscribed() {
+        let cfg = crate::config::Config::default();
+        let e = entitlement_with(&cfg, 1_000, |_| panic!("unconfigured"));
+        assert!(e.paid_features_open());
+        assert!(
+            !e.is_subscriber(),
+            "a build with nothing on sale claimed the user was subscribed"
+        );
+    }
+
+    /// An expired subscription closes the gate. It must not be mistaken for the
+    /// unconfigured case, which is open.
+    #[test]
+    fn an_expired_subscription_closes_the_paid_features() {
+        let cfg = crate::config::Config {
+            subscription_addon_store_id: "9ABCDEF12345".to_string(),
+            ..Default::default()
+        };
+        let e = entitlement_with(&cfg, 2_000, |_| {
+            StoreAnswer::Active { expires_unix: Some(1_500) }
+        });
+        assert_eq!(e.source, EntitlementSource::Store);
+        assert!(!e.subscriber);
+        assert!(!e.cloud_allowed(), "an expired subscription kept the gate open");
+        assert!(!e.importance_allowed());
+        assert!(!e.guard_allowed());
+    }
+
+    /// An unreachable Store with no cache is the case that locks out the
+    /// GitHub/MSI build, which has no package identity and so can never obtain
+    /// a licence. Recorded as a test because it is a real limitation of the
+    /// distribution model, not an accident.
+    #[test]
+    fn an_unpackaged_build_cannot_hold_a_licence() {
+        let cfg = crate::config::Config {
+            subscription_addon_store_id: "9ABCDEF12345".to_string(),
+            ..Default::default()
+        };
+        let e = entitlement_with(&cfg, 5_000, |_| {
+            StoreAnswer::Unavailable("needs a packaged build".to_string())
+        });
+        assert_eq!(e.source, EntitlementSource::Unavailable);
+        assert!(!e.subscriber);
+        assert!(!e.cloud_allowed());
     }
 
     /// The Store sometimes still reports a lapsed subscription as active. A

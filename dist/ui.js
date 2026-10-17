@@ -221,6 +221,21 @@ function layoutParts() {
 function importanceMenu() {
   const m = state.menu;
   const current = m.level;
+  const ent = state.entitlement;
+
+  // Gated in the UI as well as in the backend. Showing the levels and letting
+  // every click fail would read as a broken app rather than as a paid feature;
+  // hiding the menu without a word would read as a missing feature. So the
+  // menu still opens and says which of the two it is.
+  if (ent && !ent.importanceAllowed) {
+    return h`
+      <div class="menu-backdrop" data-act="close-menu"></div>
+      <div class="ctxmenu" style="left:${Math.round(m.x)}px;top:${Math.round(m.y)}px">
+        <div class="menu-head" title="${esc(m.path)}">${esc(m.name)}</div>
+        <div class="menu-locked">${T("imp.locked")}</div>
+      </div>`;
+  }
+
   const item = (level) => h`
     <button class="menu-item ${current === level ? "on" : ""}" data-act="set-imp" data-level="${level}">
       <span class="imp-dot ${level}"></span>
@@ -800,6 +815,14 @@ function subscriptionCard() {
         <button class="sm" data-act="refresh-entitlement">${T("sub.recheck")}</button>
       </div>
       <div class="faint mt" style="font-size:11px">${T("sub.hint")}</div>
+      <ul class="gated">
+        <li class="${e.cloudAllowed ? "" : "off"}">${T("sub.gated.cloud")}</li>
+        <li class="${e.importanceAllowed ? "" : "off"}">${T("sub.gated.importance")}</li>
+        <li class="${e.guardAllowed ? "" : "off"}">${T("sub.gated.guard")}</li>
+      </ul>
+      ${e.source === "not_configured" && !e.subscriber
+        ? `<div class="faint mt" style="font-size:11px">${T("sub.openFree")}</div>`
+        : ""}
     </div>`;
 }
 

@@ -399,6 +399,11 @@ export const actions = {
     // Marks are loaded alongside the overview because the findings tab can be
     // reached without ever opening it, and a badge that only appears after a
     // second visit would look like the save had failed.
+    // Loaded here rather than only when Settings opens, because the tier
+    // decides whether the right-click importance menu is offered at all - and
+    // that menu lives on a different tab. The answer is cached for a day, so
+    // this is one Store call on the first launch of the day, not one per view.
+    await actions.loadEntitlement();
     await actions.loadImportance();
     render();
   },

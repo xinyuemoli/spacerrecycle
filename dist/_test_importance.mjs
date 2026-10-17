@@ -192,6 +192,31 @@ check("the menu offers to clear an existing mark", html.includes("清除标记")
 check("the menu is anchored where the pointer was",
   html.includes("left:40px") && html.includes("top:60px"));
 
+// ---------- the menu when the tier is closed ----------
+//
+// The backend refuses the write either way, so the question here is what the
+// user sees. Offering the levels and letting every click fail reads as a broken
+// app; hiding the menu with no explanation reads as a missing feature. It opens
+// and names the reason.
+const openTier = S.entitlement;
+S.entitlement = {
+  subscriber: false, source: "store",
+  cloudAllowed: false, importanceAllowed: false, guardAllowed: false,
+};
+st.actions.openMenu("crit", 40, 60);
+await ui.render();
+html = doc();
+check("the menu still opens when marking is gated", html.includes("ctxmenu"));
+check("it names the reason instead of offering levels",
+  // Keyed on the menu's own buttons, not on a level's label: the labels also
+  // appear in the findings filter, which is unaffected by the tier.
+  html.includes("需要有效订阅") && !html.includes('data-act="set-imp"'),
+  html.slice(0, 240));
+check("it does not offer to clear a mark while gated", !html.includes("data-act=\"clear-imp\""));
+S.entitlement = openTier;
+st.actions.openMenu("crit", 40, 60);
+await ui.render();
+
 // ---------- saving ----------
 
 await st.actions.setImportance("C:\\Users\\me\\thesis.docx", "high");
