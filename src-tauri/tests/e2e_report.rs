@@ -55,10 +55,10 @@ fn report_what_a_quick_scan_would_find() {
             continue;
         }
         let sum: u64 = group.iter().map(|f| f.on_disk_size).sum();
-        let disposition = match group[0].disposition {
-            Disposition::Purge => "purge",
-            Disposition::Quarantine => "quarantine",
-        };
+        // Asking the type rather than re-listing its variants here: this copy
+        // had fallen behind the enum and stopped the whole test target from
+        // compiling.
+        let disposition = group[0].disposition.key();
         println!(
             "  {:<14} {:>3} items  {:>8.3} GB  default: {}",
             cat.label(),

@@ -173,6 +173,26 @@ pub enum Disposition {
     CloudBackup,
 }
 
+impl Disposition {
+    /// Stable machine key, matching the serde snake_case form the frontend and
+    /// the audit log already use.
+    ///
+    /// This existed as an inline `match` in the engine and again in a test, and
+    /// the test's copy had silently fallen behind the enum - it listed only two
+    /// of the four variants, so `cargo test` stopped compiling entirely and
+    /// nobody noticed, because a compile error in one test target does not stop
+    /// anyone from shipping a binary. One definition, in the type it describes,
+    /// is the fix for the whole class.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Disposition::Purge => "purge",
+            Disposition::Quarantine => "quarantine",
+            Disposition::Dehydrate => "dehydrate",
+            Disposition::CloudBackup => "cloud_backup",
+        }
+    }
+}
+
 /// A single cleanup candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,16 +227,16 @@ pub enum AgeBasis {
 
 impl Finding {
     /// Space actually reclaimed, which is the on-disk footprint.
+    ///
+    /// The same for every disposition today: purging frees the footprint,
+    /// quarantining moves the same bytes into the compressed store, releasing a
+    /// download frees exactly its local copy, and a cloud backup removes it.
+    /// Written as one expression because four identical arms invited the
+    /// reader to look for a difference that is not there - what actually
+    /// differs between them is what happens to the *content*, which is not
+    /// something this number can express.
     pub fn reclaimable(&self) -> u64 {
-        match self.disposition {
-            Disposition::Purge => self.on_disk_size,
-            Disposition::Quarantine => self.on_disk_size,
-            // Releasing a download frees exactly its local footprint; the
-            // logical size stays in the cloud and is not reclaimed.
-            Disposition::Dehydrate => self.on_disk_size,
-            // The local copy goes away, so the footprint is what comes back.
-            Disposition::CloudBackup => self.on_disk_size,
-        }
+        self.on_disk_size
     }
 }
 
