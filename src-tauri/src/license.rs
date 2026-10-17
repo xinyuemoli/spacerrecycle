@@ -42,6 +42,13 @@ pub enum EntitlementSource {
     Cache,
     /// The development override in the config file.
     DevOverride,
+    /// No package identity: this build was not distributed through the Store.
+    ///
+    /// A GitHub download or a hand-built binary. There is no subscription to
+    /// buy on this copy and nothing to gate, so the paid features are open -
+    /// and saying so explicitly is the point, because the alternative is a
+    /// free build that spends its life reporting "not subscribed".
+    Unpackaged,
     /// No add-on Store ID is configured, so the feature is not on sale yet.
     NotConfigured,
     /// The Store could not be asked and no usable cached answer exists.
@@ -54,9 +61,19 @@ impl EntitlementSource {
             EntitlementSource::Store => "store",
             EntitlementSource::Cache => "cache",
             EntitlementSource::DevOverride => "dev_override",
+            EntitlementSource::Unpackaged => "unpackaged",
             EntitlementSource::NotConfigured => "not_configured",
             EntitlementSource::Unavailable => "unavailable",
         }
+    }
+
+    /// Reasons that mean "there is nothing to buy here", not "you have not
+    /// paid". Both leave the paid features open, and neither is a failure.
+    fn nothing_on_sale(&self) -> bool {
+        matches!(
+            self,
+            EntitlementSource::Unpackaged | EntitlementSource::NotConfigured
+        )
     }
 }
 
@@ -83,14 +100,19 @@ impl Entitlement {
     /// "may I do this thing", and if the tier is ever split, each one can gain
     /// its own source without any call site changing.
     ///
-    /// `NotConfigured` counts as open, and that is deliberate. It means no
-    /// subscription add-on exists yet, so there is nothing on sale and nothing
-    /// to gate. Treating it as closed - which is what this code did - ships a
-    /// build whose advertised paid features are dead for everyone, including
-    /// people who would have paid. The moment `subscriptionAddonStoreId` is
-    /// filled in, this flips and the gate becomes real.
+    /// `Unpackaged` and `NotConfigured` both count as open, and that is
+    /// deliberate. They mean nothing is on sale on this copy - either because
+    /// the build did not come from the Store or because no add-on has been
+    /// published yet - so there is nothing to gate. Treating either as closed
+    /// ships a build whose advertised paid features are dead for everyone,
+    /// including people who would have paid.
+    ///
+    /// The distinction between them is kept anyway, because they read
+    /// differently to a user: "this copy is not from the Store" and "the
+    /// subscription is not on sale yet" are different sentences, and only one
+    /// of them is about them.
     pub fn paid_features_open(&self) -> bool {
-        self.subscriber || matches!(self.source, EntitlementSource::NotConfigured)
+        self.subscriber || self.source.nothing_on_sale()
     }
 
     /// Cloud backup and OneDrive quarantine, plus the quota display.
@@ -281,22 +303,31 @@ fn cache_is_fresh(cached: Option<&Cached>, now: i64) -> bool {
 /// test environment: it requires package identity, which an unpackaged `cargo
 /// test` binary does not have. Passing the probe in lets every policy branch be
 /// tested against a real store-shaped answer.
+///
+/// This variant assumes a packaged build, because that is the case every policy
+/// test is about. The unpackaged branch has its own test and its own entry point.
 pub fn entitlement_with<F>(cfg: &crate::config::Config, now: i64, ask: F) -> Entitlement
 where
     F: FnOnce(&str) -> StoreAnswer,
 {
-    entitlement_with_opts(cfg, now, ask, true)
+    entitlement_with_opts(cfg, now, ask, true, true)
 }
 
 /// As [`entitlement_with`], but able to ignore a fresh positive cache.
 ///
 /// `use_fresh_cache: false` is what a user's explicit "check again" uses: the
 /// whole point of pressing it is to not be told what we already remembered.
+///
+/// `packaged` is injected for the same reason the probe is: whether this
+/// process carries package identity is a fact about the running binary, and the
+/// test binary has none. Reading it directly here would send every Store test
+/// down the unpackaged branch.
 pub fn entitlement_with_opts<F>(
     cfg: &crate::config::Config,
     now: i64,
     ask: F,
     use_fresh_cache: bool,
+    packaged: bool,
 ) -> Entitlement
 where
     F: FnOnce(&str) -> StoreAnswer,
@@ -322,6 +353,19 @@ where
             checked_unix: now,
             expires_unix: None,
             detail: "no subscription add-on is configured".to_string(),
+        };
+    }
+
+    // Checked before the Store is asked, not after it fails: the two reasons a
+    // Store call cannot succeed are structurally different, and only one of
+    // them is worth retrying. This build simply is not a Store build.
+    if !packaged {
+        return Entitlement {
+            subscriber: false,
+            source: EntitlementSource::Unpackaged,
+            checked_unix: now,
+            expires_unix: None,
+            detail: "this build was not installed from the Microsoft Store".to_string(),
         };
     }
 
@@ -354,10 +398,42 @@ where
     result
 }
 
+/// Whether this process is running with package identity.
+///
+/// This is how "this build did not come from the Store" is told apart from "the
+/// Store could not be reached". Identity is a property of how the build was
+/// installed - a Store MSIX has it, an MSI or a hand-built binary does not - and
+/// it cannot change while the app runs, so it is a structural fact rather than a
+/// transient one.
+///
+/// The two situations call for opposite behaviour, which is why the distinction
+/// has to be made at all. A build with no identity has no subscription to buy
+/// and nothing to gate, so its features are open. A packaged build whose Store
+/// check failed is a paying user on a plane, and the grace period applies.
+#[cfg(windows)]
+pub fn has_package_identity() -> bool {
+    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+
+    let mut length: u32 = 0;
+    // The call is *expected* to fail here: with a null buffer and a zero length
+    // it reports how much room the name needs, and that particular failure is
+    // the proof that a package exists. Any other error means there is none.
+    let rc = unsafe { GetCurrentPackageFullName(&mut length, None) };
+    rc == ERROR_INSUFFICIENT_BUFFER
+}
+
+/// Non-Windows builds have no package identity by definition. The app is
+/// Windows-only; this exists so the crate still builds elsewhere.
+#[cfg(not(windows))]
+pub fn has_package_identity() -> bool {
+    false
+}
+
 /// Resolve the entitlement against the real Store.
 pub fn entitlement() -> Entitlement {
     let cfg = crate::config::Config::load();
-    entitlement_with(&cfg, now_unix(), ask_store)
+    entitlement_with_opts(&cfg, now_unix(), ask_store, true, has_package_identity())
 }
 
 /// Resolve the entitlement, ignoring a fresh positive cache.
@@ -365,7 +441,7 @@ pub fn entitlement() -> Entitlement {
 /// Backs the Settings tab's explicit re-check.
 pub fn entitlement_forced() -> Entitlement {
     let cfg = crate::config::Config::load();
-    entitlement_with_opts(&cfg, now_unix(), ask_store, false)
+    entitlement_with_opts(&cfg, now_unix(), ask_store, false, has_package_identity())
 }
 
 /// Ask the Microsoft Store whether the subscription add-on is active.
@@ -587,6 +663,69 @@ mod tests {
         assert_eq!(e.source, EntitlementSource::Unavailable);
         assert!(!e.subscriber);
         assert!(!e.cloud_allowed());
+    }
+
+    // ---------------------------------------- distribution
+
+    /// A build that did not come from the Store has nothing to sell and
+    /// therefore nothing to gate. The distinction from a packaged build whose
+    /// Store check failed is the whole reason this branch exists: that one is a
+    /// paying user offline, and this one is a free copy.
+    #[test]
+    fn a_build_that_is_not_from_the_store_gates_nothing() {
+        let cfg = crate::config::Config {
+            subscription_addon_store_id: "9ABCDEF12345".to_string(),
+            ..Default::default()
+        };
+        let e = entitlement_with_opts(
+            &cfg,
+            1_000,
+            |_| panic!("an unpackaged build must not call the Store at all"),
+            true,
+            false, // not packaged
+        );
+
+        assert_eq!(e.source, EntitlementSource::Unpackaged);
+        assert!(!e.subscriber, "a free copy claimed the user was subscribed");
+        assert!(e.cloud_allowed(), "a free copy locked a paid feature");
+        assert!(e.importance_allowed());
+        assert!(e.guard_allowed());
+        assert!(e.paid_features_open());
+    }
+
+    /// The check is ordered before the Store call rather than after it fails,
+    /// so a free copy never spends a round trip or a grace-period timer on a
+    /// licence it could not hold.
+    #[test]
+    fn the_distribution_is_settled_before_the_store_is_consulted() {
+        let cfg = crate::config::Config {
+            subscription_addon_store_id: "9ABCDEF12345".to_string(),
+            ..Default::default()
+        };
+        // The panic in the probe is the assertion: reaching it fails the test.
+        let e = entitlement_with_opts(&cfg, 1_000, |_| panic!("asked the Store"), false, false);
+        assert_eq!(e.source, EntitlementSource::Unpackaged);
+    }
+
+    /// The two open reasons are not the same sentence, and the UI shows which
+    /// one applies: "this copy is not from the Store" is about the build, while
+    /// "nothing is on sale yet" is about the product.
+    #[test]
+    fn the_two_nothing_on_sale_reasons_stay_distinguishable() {
+        let packaged_but_unsold = crate::config::Config::default();
+        let a = entitlement_with(&packaged_but_unsold, 1_000, |_| panic!("unconfigured"));
+        assert_eq!(a.source, EntitlementSource::NotConfigured);
+
+        let cfg = crate::config::Config {
+            subscription_addon_store_id: "9ABCDEF12345".to_string(),
+            ..Default::default()
+        };
+        let b = entitlement_with_opts(&cfg, 1_000, |_| panic!("unpackaged"), true, false);
+        assert_eq!(b.source, EntitlementSource::Unpackaged);
+
+        assert_ne!(a.source, b.source);
+        assert_eq!(a.source.key(), "not_configured");
+        assert_eq!(b.source.key(), "unpackaged");
     }
 
     /// The Store sometimes still reports a lapsed subscription as active. A

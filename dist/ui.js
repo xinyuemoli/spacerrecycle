@@ -798,6 +798,18 @@ function subscriptionCard() {
   const e = state.entitlement;
   if (!e) return "";
   const src = T("sub.src." + e.source);
+
+  // Why the paid features are open, when they are and nobody has paid. The two
+  // reasons are different sentences and only one of them is about the user:
+  // a copy that did not come from the Store, versus a Store build whose
+  // subscription has not gone on sale yet.
+  let openNote = "";
+  if (!e.subscriber && e.source === "unpackaged") {
+    openNote = `<div class="faint mt" style="font-size:11px">${T("sub.openUnpackaged")}</div>`;
+  } else if (!e.subscriber && e.source === "not_configured") {
+    openNote = `<div class="faint mt" style="font-size:11px">${T("sub.openUnsold")}</div>`;
+  }
+
   return h`
     <h2 class="section">${T("sub.title")}</h2>
     <div class="card mb">
@@ -820,9 +832,7 @@ function subscriptionCard() {
         <li class="${e.importanceAllowed ? "" : "off"}">${T("sub.gated.importance")}</li>
         <li class="${e.guardAllowed ? "" : "off"}">${T("sub.gated.guard")}</li>
       </ul>
-      ${e.source === "not_configured" && !e.subscriber
-        ? `<div class="faint mt" style="font-size:11px">${T("sub.openFree")}</div>`
-        : ""}
+      ${openNote}
     </div>`;
 }
 

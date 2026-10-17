@@ -65,14 +65,16 @@ function stub(cmd, args) {
       return null;
     case "onedrive_status": return { available: false, roots: [] };
     // Mirrors EntitlementView: the backend sends the three resolved flags so
-    // the frontend does not re-derive the tier rule. An unconfigured build has
-    // nothing on sale, so the paid features are open while subscriber stays
-    // false - the stub reports the same combination.
+    // the frontend does not re-derive the tier rule. The stub reports the
+    // unpackaged case, which is what a browser or unpackaged run actually is -
+    // nothing is on sale, so the paid features are open while subscriber stays
+    // false.
     case "get_entitlement":
     case "refresh_entitlement":
       return {
-        subscriber: false, source: "not_configured", checkedUnix: 0, expiresUnix: null,
-        detail: "", cloudAllowed: true, importanceAllowed: true, guardAllowed: true,
+        subscriber: false, source: "unpackaged", checkedUnix: 0, expiresUnix: null,
+        detail: "this build was not installed from the Microsoft Store",
+        cloudAllowed: true, importanceAllowed: true, guardAllowed: true,
       };
     case "graph_account_status": return { connected: false, quota: null, detail: "" };
     case "graph_connect_start": return { userCode: "SKIP-INERT", verificationUri: "", intervalSecs: 5, expiresIn: 0 };
