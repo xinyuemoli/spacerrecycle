@@ -94,7 +94,24 @@ if (-not $SkipBuild) {
         # add-on ID is visible to anyone who reads the binary.
         $env:SPACERECYCLE_ADDON_ID = $AddonStoreId
         $env:SPACERECYCLE_GRAPH_CLIENT_ID = $GraphClientId
-        cargo build --release
+
+        # cmd does the redirection, and that is the whole point.
+        #
+        # cargo writes its progress lines ("Compiling ...", "Finished ...") to
+        # stderr. In Windows PowerShell, a native command's stderr becomes an
+        # ErrorRecord, and this script runs with $ErrorActionPreference = "Stop",
+        # so the first progress line terminates the build. Adding `2>&1` to the
+        # PowerShell pipeline does not help - the record is still an error record.
+        # Letting cmd.exe merge the two streams means PowerShell never sees one:
+        # all of it arrives as ordinary stdout.
+        #
+        # $LASTEXITCODE is the only thing that actually says whether it worked,
+        # so it is checked explicitly rather than inferred from the absence of an
+        # exception - which is precisely the inference that was wrong here.
+        & cmd.exe /c "cargo build --release 2>&1" | ForEach-Object { Write-Host "    $_" }
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build --release failed with exit code $LASTEXITCODE"
+        }
     } finally {
         Pop-Location
         Remove-Item Env:\SPACERECYCLE_ADDON_ID -ErrorAction SilentlyContinue
@@ -129,14 +146,18 @@ New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 Copy-Item $exePath (Join-Path $stageDir "spacerrecycle.exe") -Force
 
 Write-Host "==> generating image assets" -ForegroundColor Cyan
-winapp manifest generate $stageDir `
-    --package-name $PackageName `
-    --publisher-name $Publisher `
-    --version $Version `
-    --description "Windows disk-space reclamation tool that never deletes anything on its own." `
-    --executable (Join-Path $stageDir "spacerrecycle.exe") `
-    --template Packaged `
-    --logo-path $logoSrc | Out-Null
+$generate = "winapp manifest generate `"$stageDir`" " +
+    "--package-name `"$PackageName`" " +
+    "--publisher-name `"$Publisher`" " +
+    "--version $Version " +
+    "--description `"Windows disk-space reclamation tool that never deletes anything on its own.`" " +
+    "--executable `"$(Join-Path $stageDir 'spacerrecycle.exe')`" " +
+    "--template Packaged " +
+    "--logo-path `"$logoSrc`""
+# cmd merges the streams for the same reason as the cargo call above: winapp is
+# a native command, and its stderr would otherwise terminate this script.
+& cmd.exe /c "$generate 2>&1" | ForEach-Object { Write-Host "    $_" }
+if ($LASTEXITCODE -ne 0) { throw "winapp manifest generate failed with exit code $LASTEXITCODE" }
 
 Write-Host "==> applying manifest template" -ForegroundColor Cyan
 $xml = Get-Content $template -Raw
@@ -149,7 +170,9 @@ Set-Content (Join-Path $stageDir "Package.appxmanifest") $xml -Encoding UTF8
 Write-Host "==> packaging and signing MSIX" -ForegroundColor Cyan
 Push-Location $msixDir
 try {
-    winapp package $stageDir --generate-cert --publisher $Publisher --output $outFile
+    & cmd.exe /c "winapp package `"$stageDir`" --generate-cert --publisher `"$Publisher`" --output `"$outFile`" 2>&1" |
+        ForEach-Object { Write-Host "    $_" }
+    if ($LASTEXITCODE -ne 0) { throw "winapp package failed with exit code $LASTEXITCODE" }
 } finally { Pop-Location }
 
 $size = [math]::Round((Get-Item $outFile).Length / 1MB, 2)
