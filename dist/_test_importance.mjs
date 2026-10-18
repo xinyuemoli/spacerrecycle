@@ -8,9 +8,14 @@
  *   - a mark that does not survive the path spelling the frontend happens to
  *     use (forward slashes, different case) is a mark that silently stops
  *     working after a re-scan;
- *   - a row marked Critical that can still be ticked produces a confirm dialog
- *     whose only outcome is a "blocked" line, so the UI must refuse it up
- *     front while the backend refuses it again on its own.
+ *   - a row marked 重要 whose irreversible option is still offered produces a
+ *     confirm dialog whose only outcome is a "blocked" line, so the option is
+ *     clamped up front while the backend refuses it again on its own.
+ *
+ * There are two levels and this asserts against the two, because the four the
+ * backend used to have were never offered anywhere a user could pick them. The
+ * names here are the ones the stream carries, so a rename on one side and not
+ * the other fails here rather than in the field.
  *
  * Like the other headless harnesses this stubs the DOM; the click paths that
  * need a real browser live in _test_dom.mjs.
@@ -116,8 +121,8 @@ S.findings = [
   f({ id: "low", name: "old.log", path: "C:\\Temp\\old.log", category: "temp_junk", risk: "safe", disposition: "purge" }),
 ];
 S.marks = new Map([
-  [st.normPath("C:\\Users\\me\\thesis.docx"), "critical"],
-  [st.normPath("C:\\Temp\\old.log"), "low"],
+  [st.normPath("C:\\Users\\me\\thesis.docx"), "important"],
+  [st.normPath("C:\\Temp\\old.log"), "disposable"],
 ]);
 S.selected = new Set();
 S.importanceFilter = "all";
@@ -125,32 +130,38 @@ S.tab = "findings";
 await ui.render();
 let html = doc();
 
-check("a marked row renders its badge", html.includes("thesis.docx") && html.includes("关键"));
+check("a marked row renders its badge", html.includes("thesis.docx") && html.includes("重要"));
 // The unmarked row's name cell must end straight into the name: if a badge had
 // leaked onto it, the cell would read "...</span>node_modules</td>" instead.
 check("an unmarked row renders no badge", html.includes(">node_modules</td>"),
   "an unmarked row picked up a badge");
-check("a low mark renders too", html.includes("可清理"), html.slice(0, 120));
+check("a disposable mark renders too", html.includes("可清理"), html.slice(0, 120));
 
-S.importanceFilter = "critical";
+S.importanceFilter = "important";
 await ui.render();
 html = doc();
-check("filtering by critical hides other rows", html.includes("thesis.docx") && !html.includes("node_modules"),
+check("filtering by important hides other rows", html.includes("thesis.docx") && !html.includes("node_modules"),
   "filter did not narrow the table");
 
 S.importanceFilter = "all";
 
-// ---------- selection is refused for critical ----------
+// ---------- every row is selectable ----------
+//
+// This is what the level collapse changed. A `critical` mark used to mean
+// "leave this alone" and the backend refused every disposition for it, so the
+// checkbox was withheld. 重要 refuses only the irreversible action and allows
+// quarantine and backup - which is what the right-click menu promises - so the
+// row stays selectable and the irreversible choice is clamped instead.
 
-check("selectable() refuses a critical row", st.selectable(S.findings[0]) === false);
-check("selectable() allows an unmarked row", st.selectable(S.findings[1]) === true);
+check("a marked row is selectable", st.selectable(S.findings[0]) === true);
+check("an unmarked row is selectable", st.selectable(S.findings[1]) === true);
 
 st.actions.toggleSel("crit");
-check("toggleSel refuses a critical row", S.selected.size === 0, "got " + S.selected.size);
+check("toggleSel accepts a marked row", S.selected.has("crit"), "got " + JSON.stringify([...S.selected]));
 
 st.actions.selAll(true);
-check("select-all skips critical rows",
-  !S.selected.has("crit") && S.selected.has("plain") && S.selected.has("low"),
+check("select-all includes marked rows",
+  S.selected.has("crit") && S.selected.has("plain") && S.selected.has("low"),
   JSON.stringify([...S.selected]));
 
 st.actions.selAll(false);
@@ -160,15 +171,15 @@ S.importanceFilter = "all";
 
 const highFinding = f({ id: "high", name: "contract.pdf", path: "C:\\Users\\me\\contract.pdf", category: "large_file", risk: "personal" });
 S.findings = [highFinding];
-S.marks = new Map([[st.normPath(highFinding.path), "high"]]);
-check("a high mark clamps purge to quarantine",
+S.marks = new Map([[st.normPath(highFinding.path), "important"]]);
+check("an important mark clamps purge to quarantine",
   st.effectiveDisposition(highFinding) === "quarantine",
   "got " + st.effectiveDisposition(highFinding));
 
 const tempHigh = f({ id: "th", name: "x.tmp", path: "C:\\Temp\\x.tmp", category: "temp_junk", risk: "safe", disposition: "purge" });
 S.findings = [tempHigh];
-S.marks = new Map([[st.normPath(tempHigh.path), "high"]]);
-check("a high mark clamps a temp file too",
+S.marks = new Map([[st.normPath(tempHigh.path), "important"]]);
+check("an important mark clamps a temp file too",
   st.effectiveDisposition(tempHigh) === "quarantine",
   "got " + st.effectiveDisposition(tempHigh));
 
@@ -180,14 +191,17 @@ check("an unmarked category default is untouched",
 // ---------- the menu ----------
 
 S.findings = [f({ id: "crit", name: "thesis.docx", path: "C:\\Users\\me\\thesis.docx", category: "large_file", risk: "personal" })];
-S.marks = new Map([[st.normPath("C:\\Users\\me\\thesis.docx"), "critical"]]);
+S.marks = new Map([[st.normPath("C:\\Users\\me\\thesis.docx"), "important"]]);
 st.actions.openMenu("crit", 40, 60);
 await ui.render();
 html = doc();
 check("the menu opens", S.menu !== null && html.includes("ctxmenu"));
 check("the menu offers every level",
-  ["关键", "重要", "普通", "可清理"].every(label => html.includes(label)),
+  ["重要", "可清理"].every(label => html.includes(label)),
   html.slice(0, 200));
+check("the menu offers exactly two levels",
+  !html.includes("关键") && !html.includes("普通"),
+  "a level from the old four-level model is still offered");
 check("the menu offers to clear an existing mark", html.includes("清除标记"));
 check("the menu is anchored where the pointer was",
   html.includes("left:40px") && html.includes("top:60px"));
@@ -219,10 +233,10 @@ await ui.render();
 
 // ---------- saving ----------
 
-await st.actions.setImportance("C:\\Users\\me\\thesis.docx", "high");
+await st.actions.setImportance("C:\\Users\\me\\thesis.docx", "important");
 check("saving calls the backend with the level",
-  calls.some(c => c.cmd === "set_importance" && c.args.level === "high" && c.args.path === "C:\\Users\\me\\thesis.docx"));
-check("saving updates the local map", st.importanceOf(S.findings[0]) === "high");
+  calls.some(c => c.cmd === "set_importance" && c.args.level === "important" && c.args.path === "C:\\Users\\me\\thesis.docx"));
+check("saving updates the local map", st.importanceOf(S.findings[0]) === "important");
 check("saving closes the menu", S.menu === null);
 
 await st.actions.clearImportance("C:\\Users\\me\\thesis.docx");
@@ -231,10 +245,10 @@ check("clearing drops the local mark", st.importanceOf(S.findings[0]) === null);
 
 // ---------- loading ----------
 
-serverMarks = [{ path: "C:\\Users\\me\\thesis.docx", level: "critical", markedUnix: 1 }];
+serverMarks = [{ path: "C:\\Users\\me\\thesis.docx", level: "important", markedUnix: 1 }];
 await st.actions.loadImportance();
 check("loading keys marks by normalized path",
-  st.importanceOf(S.findings[0]) === "critical",
+  st.importanceOf(S.findings[0]) === "important",
   "map=" + JSON.stringify([...S.marks]));
 
 console.log(`\n${pass} passed, ${fail} failed`);

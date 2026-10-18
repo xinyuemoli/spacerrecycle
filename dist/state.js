@@ -33,7 +33,7 @@ const state = {
    * every finding from scratch. Re-reading the map after a scan is what makes
    * a mark survive one.
    */
-  marks: new Map(),         // normalized path -> "critical" | "high" | "normal" | "low"
+  marks: new Map(),         // normalized path -> "important" | "disposable"
   importanceFilter: "all",  // "all" | level, for the findings toolbar
   menu: null,               // { path, name, level, x, y } right-click menu anchor
   entitlement: null,        // subscription state, loaded when Settings opens
@@ -200,7 +200,7 @@ export function toast(msg, kind = "") {
 // ---------- derived ----------
 
 /** The importance levels, most important first. Drives the menu and the filter. */
-export const IMPORTANCE_LEVELS = ["critical", "high", "normal", "low"];
+export const IMPORTANCE_LEVELS = ["important", "disposable"];
 
 /**
  * Normalize a path into the same key form the backend store uses.
@@ -227,15 +227,19 @@ export function importanceRank(level) {
 }
 
 /**
- * A mark of critical or high takes the irreversible option off the table.
+ * A mark of important takes the irreversible option off the table.
  *
- * The backend re-checks this and refuses regardless, but offering a button
- * that is guaranteed to be refused is worse than not offering it: the user
- * would confirm an irreversible action and get a "blocked" row instead.
+ * The backend re-checks this and refuses regardless, but offering a button that
+ * is guaranteed to be refused is worse than not offering it: the user would
+ * confirm an irreversible action and get a "blocked" row instead.
+ *
+ * Quarantine and cloud backup are deliberately *not* clamped - the right-click
+ * menu promises both for an important file ("cleanup may quarantine or back it
+ * up, but never delete it"), so removing them here would contradict the menu.
  */
 export function clampDisposition(f, d) {
   const level = importanceOf(f);
-  if (d === "purge" && (level === "critical" || level === "high")) return "quarantine";
+  if (d === "purge" && level === "important") return "quarantine";
   return d;
 }
 
@@ -293,12 +297,19 @@ export function filteredFindings() {
 /**
  * Rows the user is allowed to select.
  *
- * A critical mark means "leave this alone": the backend refuses every
- * disposition for it, so a checkbox that can be ticked would only produce a
- * preview full of rows guaranteed to be blocked.
+ * Every row is selectable now, which was not true when there were four levels.
+ * A `critical` mark used to mean "leave this alone" and the backend refused
+ * every disposition for it, so the checkbox was withheld to avoid a preview
+ * full of rows that could only be blocked.
+ *
+ * The two-level model has no such level: 重要 refuses the irreversible action
+ * and allows the two reversible ones. The row is therefore selectable, the
+ * irreversible option is clamped to quarantine by {@link clampDisposition}, and
+ * the menu's promise holds. The function is kept rather than inlined at its call
+ * sites because it is the single place that decision is written down.
  */
 export function selectable(f) {
-  return importanceOf(f) !== "critical";
+  return Boolean(f);
 }
 
 /**

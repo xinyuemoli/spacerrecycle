@@ -1,3 +1,5 @@
+pub mod ads;
+pub mod autostart;
 pub mod cloud;
 pub mod commands;
 pub mod config;
@@ -112,6 +114,7 @@ pub fn run() {
             commands::guard_status,
             commands::protection_status,
             commands::set_guard_disposition,
+            commands::autostart_status,
             commands::onedrive_status,
             commands::get_entitlement,
             commands::refresh_entitlement,

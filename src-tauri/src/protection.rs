@@ -316,26 +316,62 @@ pub fn holds() -> &'static crate::hold::HoldGuard {
 /// Holds files open so that Windows refuses to delete them.
 pub struct HoldProtection;
 
-/// Makes the held set match the marks, and reports what could not be held.
+/// Makes the held set match every mark this machine has, and reports what could
+/// not be held.
 ///
-/// The marks are the source of truth rather than a register kept alongside the
-/// handles: the set of handles is then derived state that cannot drift, and a
-/// restart needs no recovery because the marks are already on disk.
+/// There are two places a mark can live, and before this function existed the
+/// guard only knew about one of them:
 ///
-/// `protects_externally` decides which levels qualify, which today means
-/// `Critical` and is the 重要 side of the two-level model the product is heading
-/// for.
+/// * the app's JSON store, written by the app's own screens;
+/// * the `SpaceRecycle.Importance` stream, written by the right-click menu and,
+///   now, by the app as well.
+///
+/// A file marked through the right-click menu was marked in a place nothing
+/// read, so the menu produced an icon and no protection at all. The stream is
+/// read through the index because a stream is a property of one file and cannot
+/// be enumerated - see `ads::index_path`.
+///
+/// A path counts if any of the two says 重要. Neither is asked to agree with the
+/// other, because they can legitimately disagree: the stream travels with the
+/// file and the store is per-user, so a file copied from another machine can
+/// arrive marked. Erring towards holding is the right direction for a guard.
+///
+/// The index is rewritten afterwards so that entries for files that were
+/// deleted or cleared do not accumulate.
 ///
 /// Failures are returned rather than swallowed. A file that could not be held is
 /// unprotected, and a caller that reported success anyway would be telling the
 /// user they are safe when they are not.
 pub fn sync_holds_from_marks() -> Vec<(std::path::PathBuf, String)> {
-    let paths: Vec<std::path::PathBuf> = crate::importance::Store::load()
-        .entries()
-        .into_iter()
-        .filter(|e| e.level.protects_externally())
-        .map(|e| std::path::PathBuf::from(&e.path))
-        .collect();
+    let mut wanted: std::collections::BTreeSet<std::path::PathBuf> = std::collections::BTreeSet::new();
+
+    // The app's own store.
+    for e in crate::importance::Store::load().entries() {
+        if e.level.protects_externally() {
+            wanted.insert(std::path::PathBuf::from(&e.path));
+        }
+    }
+
+    // The shell's marks, reached through the index.
+    let from_streams = crate::ads::resolve_index();
+    for (path, level) in &from_streams {
+        if level.protects_externally() {
+            wanted.insert(path.clone());
+        }
+    }
+
+    // Pruned to what the streams still vouch for. Entries whose file is gone, or
+    // whose mark was cleared through the menu, are dropped here rather than
+    // needing the shell to maintain the list on every clear.
+    let alive: Vec<std::path::PathBuf> = from_streams.into_iter().map(|(p, _)| p).collect();
+    if let Err(e) = crate::ads::rewrite_index(&alive) {
+        // Not fatal: the holds below are what protect files. Reported through
+        // the failure list so it is not silent, since an index that cannot be
+        // written will keep re-appearing.
+        return vec![(std::path::PathBuf::from("<index>"), e)];
+    }
+
+    let paths: Vec<std::path::PathBuf> = wanted.into_iter().collect();
     let failures = holds().sync(&paths);
 
     // Kept so that Settings can name them. A file that could not be held is
@@ -477,27 +513,39 @@ pub fn status() -> Status {
                     // actually being held, which is the question a user looking
                     // at "protection is on" is really asking.
                     let held = holds().protected_count();
-                    let failed = last_sync_failures();
                     let base = match held {
                         0 => "the guard is on, but no file is currently held".to_string(),
                         1 => "1 marked file is held open, so it cannot be deleted".to_string(),
                         n => format!("{n} marked files are held open, so they cannot be deleted"),
                     };
-                    if failed.is_empty() {
-                        base
-                    } else {
-                        // Named, not counted. "2 files could not be protected" leaves
-                        // the user with no way to find out which two.
-                        format!(
-                            "{base}. {} could not be protected: {}",
+
+                    // Both kinds of failure, kept separate because they call for
+                    // different actions: a mark that could not be held is a
+                    // permissions or lock problem on one file, while a store
+                    // that could not be read means the guard does not know what
+                    // to protect at all.
+                    let mut detail = base;
+                    if let Some(e) = crate::importance::last_load_error() {
+                        detail.push_str(&format!(
+                            ". The list of marks could not be read, so nothing it contains is \
+                             protected: {e}"
+                        ));
+                    }
+                    let failed = last_sync_failures();
+                    if !failed.is_empty() {
+                        // Named, not counted. "2 files could not be protected"
+                        // leaves the user with no way to find out which two.
+                        detail.push_str(&format!(
+                            ". {} could not be protected: {}",
                             failed.len(),
                             failed
                                 .iter()
                                 .map(|(p, e)| format!("{} ({e})", p.display()))
                                 .collect::<Vec<_>>()
                                 .join("; ")
-                        )
+                        ));
                     }
+                    detail
                 }
                 Kind::Acl => {
                     "protected by a deny entry in each marked file's permissions".to_string()

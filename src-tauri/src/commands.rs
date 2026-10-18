@@ -762,6 +762,26 @@ pub async fn set_importance(
         store.set(std::path::Path::new(&path), level);
         store.save().map_err(|e| format!("无法保存重要级别：{e}"))?;
 
+        // Also write the stream the shell extension reads, and add the path to
+        // the index the guard enumerates.
+        //
+        // Without this the app and the menu were two disconnected stores: the
+        // app's marks were invisible to the shell, so a file marked here showed
+        // no icon overlay, and the shell's marks were invisible to the app, so
+        // a file marked there was not protected. Writing both from both entry
+        // points is what makes them one store.
+        //
+        // Failures are reported but do not undo the store write: the mark is
+        // recorded either way, and a filesystem that cannot hold a stream can
+        // still be cleaned up correctly through the app's own list.
+        let stream_error = crate::ads::write(
+            std::path::Path::new(&path),
+            level,
+            crate::license::now_unix(),
+        )
+        .err();
+        let index_error = crate::ads::index_add(std::path::Path::new(&path)).err();
+
         // The mark is stored; now make the guard agree with it. Only when the
         // guard is actually standing: with the disposition on "allow" the user
         // has said they do not want deletes blocked, and holding a newly marked
@@ -769,7 +789,17 @@ pub async fn set_importance(
         if crate::guard::read() != crate::guard::Disposition::Allow {
             crate::protection::sync_holds_from_marks();
         }
-        Ok(())
+
+        match (stream_error, index_error) {
+            (None, None) => Ok(()),
+            (Some(e), None) => Err(format!(
+                "已保存标记，但这块磁盘不支持写入增量标记（图标叠加不会显示）：{e}"
+            )),
+            (None, Some(e)) => Err(format!("已保存标记，但无法更新防护清单：{e}")),
+            (Some(e1), Some(e2)) => Err(format!(
+                "已保存标记，但增量标记与防护清单都写入失败：{e1}；{e2}"
+            )),
+        }
     })
     .await
 }
@@ -792,12 +822,27 @@ pub async fn clear_importance(path: String) -> Result<(), String> {
         store.remove(std::path::Path::new(&path));
         store.save().map_err(|e| format!("无法保存重要级别：{e}"))?;
 
+        // The stream too, or the shell would keep drawing an overlay for a mark
+        // that is gone and the guard would keep holding a file the user released.
+        let _ = crate::ads::clear(std::path::Path::new(&path));
+
         // Release before re-syncing, and by path rather than by rebuilding from
         // the store. The file being cleared may be the one the store could not
         // write, and leaving a handle on a file the user has just released is
         // the one failure of this mechanism that would be immediately visible
         // to them.
         let _ = crate::protection::holds().release(std::path::Path::new(&path));
+
+        // Drop the index entry now rather than leaving it for the next prune.
+        // Until it runs the entry is harmless - a path only counts while its
+        // stream says so - but it is a stale line in a file people may read.
+        let target = std::path::Path::new(&path);
+        let mut paths = crate::ads::read_index();
+        let before = paths.len();
+        paths.retain(|p| p.as_path() != target);
+        if paths.len() != before {
+            let _ = crate::ads::rewrite_index(&paths);
+        }
         Ok(())
     })
     .await
@@ -865,7 +910,43 @@ pub async fn set_guard_disposition(disposition: crate::guard::Disposition) -> Re
             // would be an "ask me" setting that protects nothing at all.
             crate::protection::sync_holds_from_marks();
         }
+
+        // Autostart follows the guard. A held handle ends when the process
+        // ends, so a guard that only runs while a window is open protects files
+        // during exactly the hours the user is already watching them.
+        //
+        // The result is not turned into an error: the disposition was written
+        // and the holds were applied, so the setting took effect. Autostart is
+        // reported through `autostart_status` so a failure to register is
+        // visible without pretending the guard did not change.
+        let _ = crate::autostart::follow_guard(!stands_down);
+
         Ok(())
+    })
+    .await
+}
+
+/// Whether the app is registered to start at logon, and why not if it is not.
+///
+/// The guard only exists while the process holding the files exists, so this is
+/// not a convenience setting - it is part of whether the protection is on. It
+/// follows the disposition rather than having a switch of its own, so there is
+/// no second thing to get wrong.
+#[tauri::command]
+pub async fn autostart_status() -> Result<serde_json::Value, String> {
+    offload(move || {
+        let enabled = crate::autostart::is_enabled();
+        Ok(serde_json::json!({
+            "enabled": enabled,
+            // Shown as-is. "Could not register" is the useful message here, and
+            // a boolean would hide it - the user would see autostart off and
+            // have no way to find out why.
+            "detail": if enabled {
+                "starts with Windows, so the guard is up after a reboot"
+            } else {
+                "does not start with Windows, so the guard is only on while the app is open"
+            },
+        }))
     })
     .await
 }

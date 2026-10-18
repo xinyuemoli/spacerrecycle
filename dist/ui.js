@@ -535,11 +535,13 @@ function row(f) {
   const d = effectiveDisposition(f);
   const overridden = state.overrides.has(f.id);
   const level = importanceOf(f);
-  // A critical mark means "leave this alone". The row stays visible - the user
-  // still needs to see what is on their disk - but it cannot be acted on, and
-  // the backend would refuse anyway.
+  // The row stays visible - the user still needs to see what is on their disk -
+  // and every row is selectable, which was not true when a `critical` mark
+  // existed and the backend refused every disposition for it.
   const locked = !selectable(f);
-  const noPurge = level === "critical" || level === "high";
+  // 重要 takes the irreversible action off the table and leaves the two
+  // reversible ones. That is what the right-click menu promises for this level.
+  const noPurge = level === "important";
 
   let options;
   if (locked) {
@@ -549,7 +551,7 @@ function row(f) {
     // is a statement rather than a choice.
     options = `<option value="dehydrate" selected>${T("disp.dehydrate")}</option>`;
   } else if (f.category === "temp_junk" || f.category === "system_cache") {
-    // Temp files normally offer purge and nothing else. A High mark removes
+    // Temp files normally offer purge and nothing else. An 重要 mark removes
     // that option, and quarantine is the only restorable alternative - so it
     // becomes the offer rather than an empty, unusable dropdown.
     options = noPurge

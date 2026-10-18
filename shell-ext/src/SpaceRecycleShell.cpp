@@ -179,6 +179,157 @@ std::wstring ReadLevel(const wchar_t* path) {
     return std::wstring();
 }
 
+// ---------------------------------------------------------------- the index
+//
+// A stream is a property of one file and says nothing about where the other
+// marked files are, so the marks cannot be enumerated from them. The
+// application therefore had no way to find a file marked from this menu, which
+// made the menu an icon and nothing more: the delete guard protects what it can
+// see, and it could not see these.
+//
+// This is the smallest thing that closes that - a plain text list of paths, one
+// per line, that this menu appends to and the application reads.
+//
+// Deliberately **not** authoritative. The application re-reads each path's
+// stream and ignores the entries that no longer have one, so:
+//
+//   * clearing a mark needs no write here at all - the stream goes, the entry
+//     stops counting, and the application rewrites the file without it;
+//   * a stale or unreadable line costs nothing and protects nothing;
+//   * a failure to write this file loses protection for one file temporarily,
+//     rather than corrupting anything.
+//
+// That is also why it lives in ProgramData rather than in the user's profile:
+// the menu runs inside whatever process Explorer hosts it in, and the guard
+// needs the same list it would see. Both run as the same user, but the shell's
+// view of the profile is not something to depend on.
+
+/// `%ProgramData%\SpaceRecycle\`, created if absent. Empty on failure.
+std::wstring IndexDir() {
+    wchar_t buf[MAX_PATH] = {0};
+    DWORD n = GetEnvironmentVariableW(L"ProgramData", buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        return std::wstring();
+    }
+    std::wstring dir(buf, n);
+    dir += L"\\SpaceRecycle";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    // A second call distinguishes "created" from "already there" without
+    // treating the already-there case as an error.
+    if (GetLastError() != ERROR_ALREADY_EXISTS && !CreateDirectoryW(dir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        return std::wstring();
+    }
+    return dir;
+}
+
+/// Reads the index into a set of paths. Used to avoid appending a duplicate.
+bool ReadIndex(std::vector<std::wstring>& out) {
+    std::wstring dir = IndexDir();
+    if (dir.empty()) {
+        return false;
+    }
+    std::wstring file = dir + L"\\marked.txt";
+    HANDLE h = CreateFileW(file.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        // Not there yet is the normal first-run state, not a failure.
+        return GetLastError() == ERROR_FILE_NOT_FOUND;
+    }
+    std::string text;
+    char chunk[4096];
+    DWORD read = 0;
+    while (ReadFile(h, chunk, sizeof(chunk), &read, nullptr) && read > 0) {
+        text.append(chunk, read);
+    }
+    CloseHandle(h);
+
+    // A BOM would glue itself to the first path and make it match nothing. The
+    // application strips it too; doing it on both sides means neither has to
+    // trust the other.
+    size_t start = 0;
+    if (text.size() >= 3 && (unsigned char)text[0] == 0xEF &&
+        (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) {
+        start = 3;
+    }
+    size_t pos = start;
+    while (pos <= text.size()) {
+        size_t nl = text.find('\n', pos);
+        if (nl == std::string::npos) {
+            nl = text.size();
+        }
+        std::string line = text.substr(pos, nl - pos);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        size_t first = line.find_first_not_of(' ');
+        if (first != std::string::npos && line[first] != '#') {
+            std::wstring wide(line.begin() + first, line.end());
+            out.push_back(wide);
+        }
+        if (nl == text.size()) {
+            break;
+        }
+        pos = nl + 1;
+    }
+    return true;
+}
+
+/// Adds one path to the index, rewriting the file rather than appending.
+///
+/// Rewriting keeps the file bounded: marking and unmarking the same file
+/// repeatedly would otherwise grow it without limit. Written through a
+/// temporary file and renamed, so an interrupted write cannot truncate the list
+/// and silently unprotected every other marked file.
+void IndexAdd(const wchar_t* path) {
+    std::vector<std::wstring> paths;
+    if (!ReadIndex(paths)) {
+        return;
+    }
+    std::wstring want(path);
+    for (const auto& p : paths) {
+        if (p == want) {
+            return; // already listed
+        }
+    }
+    paths.push_back(want);
+
+    std::wstring dir = IndexDir();
+    if (dir.empty()) {
+        return;
+    }
+    std::wstring file = dir + L"\\marked.txt";
+    std::wstring tmp = file + L".tmp";
+
+    std::string body =
+        "# Paths the right-click menu has marked.\n"
+        "# Written by the shell extension and by the application; not\n"
+        "# authoritative - a path only counts while its\n"
+        "# SpaceRecycle.Importance stream says so.\n";
+    for (const auto& p : paths) {
+        for (wchar_t c : p) {
+            body.push_back(c < 128 ? (char)c : '?');
+        }
+        body.push_back('\n');
+    }
+
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    DWORD written = 0;
+    BOOL ok = WriteFile(h, body.data(), (DWORD)body.size(), &written, nullptr) &&
+              written == (DWORD)body.size();
+    CloseHandle(h);
+    if (!ok) {
+        DeleteFileW(tmp.c_str());
+        return;
+    }
+    MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
 bool WriteLevel(const wchar_t* path, const wchar_t* token) {
     std::wstring stream = StreamPath(path);
     HANDLE h = CreateFileW(stream.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
@@ -199,8 +350,15 @@ bool WriteLevel(const wchar_t* path, const wchar_t* token) {
         // Never leave a half-written marker behind: an empty or short stream
         // would read back as unmarked and silently lose the user's choice.
         DeleteFileW(stream.c_str());
+        return false;
     }
-    return ok == TRUE;
+    // The stream is the mark; this is only how the application finds it. A
+    // failure here is not reported as a failure to mark, because the mark is
+    // written and the overlay will show - but it does mean the delete guard
+    // will not know about the file, so it must not fail silently either. See
+    // IndexPath below.
+    IndexAdd(path);
+    return true;
 }
 
 bool ClearLevel(const wchar_t* path) {

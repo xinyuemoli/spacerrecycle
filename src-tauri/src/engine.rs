@@ -110,7 +110,11 @@ pub fn build_preview(items: &[SelectedItem]) -> Vec<PreviewGroup> {
         // Only a *permanent purge* of a red-tagged item is dangerous. The spec
         // says quarantine needs no such confirmation (it is restorable), so the
         // warning must key off the disposition, not just the risk tier.
-        if it.disposition == Disposition::Purge && it.finding.category.risk() == RiskTier::UserData {
+        //
+        // Through `risk_to_act_on`, not straight off the category: the category
+        // is part of the request, and the preview must not promise a quiet
+        // deletion that the commit path will then refuse to perform.
+        if it.disposition == Disposition::Purge && risk_to_act_on(it) == RiskTier::UserData {
             e.4 = true;
         }
     }
@@ -164,35 +168,77 @@ fn is_dir_now(path: &Path, fallback: bool) -> bool {
 /// client, and this is the gate that keeps that choice inside the user's own
 /// stated intent.
 ///
-/// Critical blocks everything, including quarantine and cloud backup: the user
-/// said this matters, and moving the only accessible copy to a restorable-but-
-/// remote store is still a change they did not ask for. High blocks only the
-/// irreversible action; quarantine stays available because it can be undone.
+/// 重要 blocks exactly one thing: the irreversible action.
+///
+/// Quarantine and cloud backup stay available because both can be undone, and
+/// that is what the right-click menu promises for this level in as many words -
+/// "cleanup may quarantine or back it up, but never delete it". A level that
+/// also blocked backup would refuse something the menu told the user it does.
+///
+/// The four-level model had a `Critical` above this that refused everything
+/// including backup, on the reasoning that moving the only accessible copy to a
+/// remote store is still a change nobody asked for. The reasoning is sound and
+/// the level was never offered anywhere a user could choose it, so it was a rule
+/// with no way to opt in. Two levels cannot carry both meanings, and the one the
+/// menu advertises wins.
 pub fn importance_block(
     level: crate::importance::Importance,
     disposition: Disposition,
 ) -> Option<&'static str> {
     use crate::importance::Importance;
     match (level, disposition) {
-        (Importance::Critical, _) => {
-            Some("marked critical: this path must be left alone")
+        (Importance::Important, Disposition::Purge) => {
+            Some("marked important: it will not be deleted, only quarantined or backed up")
         }
-        (Importance::High, Disposition::Purge) => {
-            Some("marked important: only restorable actions are allowed")
+        // Releasing a cloud placeholder's local copy is not one of the two
+        // things the menu promises to still allow, and it takes away the only
+        // copy that is on this machine. It was blocked by the old `Critical`
+        // level for that reason, and the reasoning survives the merge.
+        (Importance::Important, Disposition::Dehydrate) => {
+            Some("marked important: the local copy is kept, not released to the cloud")
         }
         _ => None,
     }
 }
 
+/// The risk tier the server is willing to act on for this item.
+///
+/// # What was wrong before
+///
+/// Risk was derived from the category rather than read from the finding's own
+/// `risk` field, and that was described as the server-side truth. It was not.
+/// The category arrived in the same request, so a request that called an
+/// app-leftover directory a temp file still got the confirmation step removed -
+/// the derivation was honest about its input and the input was the problem.
+///
+/// # What this does
+///
+/// A claim of *danger* is accepted as-is: nobody gets past this gate by asking
+/// for more confirmation, and second-guessing it would add a box to selections
+/// that already have one. Only `Safe` is verified, against the paths this
+/// server can point at its own scanners - see [`safety::vouched_safe`].
+///
+/// An unvouched claim becomes [`RiskTier::UserData`], the tier that requires the
+/// red confirmation. That is the safe direction to be wrong in: the cost is a
+/// checkbox, and the cost of the other direction is an irreversible deletion of
+/// something the user never agreed to.
+pub fn risk_to_act_on(item: &SelectedItem) -> RiskTier {
+    let claimed = item.finding.category.risk();
+    if claimed != RiskTier::Safe {
+        return claimed;
+    }
+    if crate::safety::vouched_safe(std::path::Path::new(&item.finding.path)) {
+        RiskTier::Safe
+    } else {
+        RiskTier::UserData
+    }
+}
+
 /// True when the selection needs the red-tag confirmation box to be ticked.
 pub fn needs_red_confirmation(items: &[SelectedItem]) -> bool {
-    // Risk is derived from category, never trusted from the client: the
-    // finding's `risk` field is shipped across IPC and could be relabelled to
-    // skip the confirmation gate. Category is the server-side truth about what
-    // kind of data something is.
     items
         .iter()
-        .any(|i| i.disposition == Disposition::Purge && i.finding.category.risk() == RiskTier::UserData)
+        .any(|i| i.disposition == Disposition::Purge && risk_to_act_on(i) == RiskTier::UserData)
 }
 
 /// Everything the pipeline needs to know about cloud backup.
@@ -297,7 +343,7 @@ pub fn run_cleanup_full(
     if needs_red_confirmation(&req.items) && !req.confirmed_red_purge {
         let mut remaining = Vec::new();
         for item in to_purge {
-            if item.finding.category.risk() == RiskTier::UserData {
+            if risk_to_act_on(&item) == RiskTier::UserData {
                 crate::log::record(
                     crate::log::Action::Purge,
                     &item.finding.path,
@@ -892,48 +938,22 @@ mod tests {
         s
     }
 
-    /// The headline guarantee: a path the user marked Critical survives even
-    /// when the client explicitly asks for a permanent purge.
+    /// The headline guarantee, both halves of it: a path the user marked 重要
+    /// survives a requested permanent purge, and quarantine still works.
+    ///
+    /// Both halves are asserted because a gate that blocked everything would
+    /// pass the first one while silently breaking the product - and the menu
+    /// promises the second: "cleanup may quarantine or back it up, but never
+    /// delete it".
     #[test]
-    fn a_critical_mark_survives_a_requested_purge() {
-        let dir = std::env::temp_dir().join(format!("sr-gate-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("thesis.docx");
-        std::fs::write(&target, b"the only copy").unwrap();
-        let path = target.to_string_lossy().to_string();
-
-        let marks = marked(&path, crate::importance::Importance::Critical);
-        let cfg = crate::config::Config::default();
-        let report = run_cleanup_with_marks(
-            CleanupRequest {
-                items: vec![item(&path, Category::TempJunk, Disposition::Purge)],
-                confirmed_red_purge: true,
-            },
-            &cfg,
-            &marks,
-        );
-
-        assert_eq!(report.purged.len(), 0, "a Critical item was purged");
-        assert_eq!(report.blocked.len(), 1);
-        assert!(
-            target.exists(),
-            "the file behind a Critical mark must still be on disk"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// High means "restorable actions only": quarantine is allowed, purge is
-    /// not. Both halves are asserted, because a gate that blocks everything
-    /// would pass the purge half while silently breaking the product.
-    #[test]
-    fn a_high_mark_blocks_purge_but_allows_quarantine() {
+    fn an_important_mark_blocks_purge_but_allows_quarantine() {
         let dir = std::env::temp_dir().join(format!("sr-gate-{}", uuid::Uuid::new_v4()));
         let src = dir.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let file = src.join("notes.txt");
         std::fs::write(&file, b"keep me recoverable").unwrap();
         let path = file.to_string_lossy().to_string();
-        let marks = marked(&path, crate::importance::Importance::High);
+        let marks = marked(&path, crate::importance::Importance::Important);
 
         let mut cfg = crate::config::Config::default();
         // Keep the batch out of the machine's real quarantine store: these
@@ -979,7 +999,7 @@ mod tests {
 
         // The store says Critical. Nothing in the request contradicts it,
         // because nothing in the request is trusted.
-        let marks = marked(&path, crate::importance::Importance::Critical);
+        let marks = marked(&path, crate::importance::Importance::Important);
         let cfg = crate::config::Config::default();
         let report = run_cleanup_with_marks(
             CleanupRequest {
@@ -1021,21 +1041,37 @@ mod tests {
     #[test]
     fn importance_gate_matches_its_documented_matrix() {
         use crate::importance::Importance::*;
-        // Critical stops both actions.
-        assert!(importance_block(Critical, Disposition::Purge).is_some());
-        assert!(importance_block(Critical, Disposition::Quarantine).is_some());
-        // A Critical mark must also stop a release: pulling the only on-disk
-        // copy of something the user called critical is a change they did not
-        // ask for, however reversible it is in theory.
-        assert!(importance_block(Critical, Disposition::Dehydrate).is_some());
-        // High stops only the irreversible one.
-        assert!(importance_block(High, Disposition::Purge).is_some());
-        assert!(importance_block(High, Disposition::Quarantine).is_none());
-        // Normal and Low never block.
-        for level in [Normal, Low] {
-            assert!(importance_block(level, Disposition::Purge).is_none());
-            assert!(importance_block(level, Disposition::Quarantine).is_none());
+        // 重要 stops the irreversible action, the cloud release, and nothing
+        // else. Two things stay available because the menu promises them:
+        // quarantine and backup.
+        assert!(importance_block(Important, Disposition::Purge).is_some());
+        assert!(importance_block(Important, Disposition::Dehydrate).is_some());
+        assert!(importance_block(Important, Disposition::Quarantine).is_none());
+        assert!(importance_block(Important, Disposition::CloudBackup).is_none());
+        // 可清理 never blocks anything: the user said it may go.
+        for d in [Disposition::Purge, Disposition::Quarantine, Disposition::Dehydrate] {
+            assert!(
+                importance_block(Disposable, d).is_none(),
+                "{d:?} was blocked on a file the user called disposable"
+            );
         }
+    }
+
+    /// The four-level matrix, kept as a statement of what changed.
+    ///
+    /// `Critical` used to stop quarantine and backup as well. Both of those are
+    /// now allowed for 重要, because the right-click menu tells the user they
+    /// are - and the level that refused them was never offered in the menu, so
+    /// no user could have chosen it.
+    #[test]
+    fn the_merge_widened_what_is_allowed_and_not_what_is_blocked() {
+        use crate::importance::Importance::Important;
+        // Still blocked: the two that take something away.
+        assert!(importance_block(Important, Disposition::Purge).is_some());
+        assert!(importance_block(Important, Disposition::Dehydrate).is_some());
+        // Newly allowed: the two that keep a copy.
+        assert!(importance_block(Important, Disposition::Quarantine).is_none());
+        assert!(importance_block(Important, Disposition::CloudBackup).is_none());
     }
 
     // ---------- cloud-backed content ----------
@@ -1534,38 +1570,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A Critical mark blocks every action, including this one.
+    /// 重要 allows a confirmed upload, because an upload is restorable and that
+    /// is what the right-click menu promises for this level.
+    ///
+    /// The four-level model had a `Critical` above it that refused backup too.
+    /// That level was never offered in the menu, so this is the behaviour a user
+    /// could actually have chosen - and the only one the two-level model can
+    /// express.
     #[test]
-    fn a_critical_mark_blocks_a_cloud_backup() {
-        let (dir, cfg) = scratch("crit");
-        let target = dir.join("thesis");
-        std::fs::create_dir_all(&target).unwrap();
-        let path = target.to_string_lossy().to_string();
-
-        let sink = FakeSink::ok();
-        let cloud = CloudContext { subscriber: true, sink: Some(&sink), batch_id: "b".into() };
-        let marks = marked(&path, crate::importance::Importance::Critical);
-        let report = run_cleanup_full(
-            CleanupRequest {
-                items: vec![item(&path, Category::LargeFile, Disposition::CloudBackup)],
-                confirmed_red_purge: false,
-            },
-            &cfg,
-            &marks,
-            &cloud,
-        );
-
-        assert!(report.backed_up.is_empty());
-        assert_eq!(report.blocked.len(), 1);
-        assert!(target.exists());
-        assert!(sink.calls().is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// High means "restorable actions only", and a confirmed upload is
-    /// restorable - so this must be allowed through.
-    #[test]
-    fn a_high_mark_allows_a_cloud_backup() {
+    fn an_important_mark_allows_a_cloud_backup() {
         let (dir, cfg) = scratch("high");
         let target = dir.join("contracts");
         std::fs::create_dir_all(&target).unwrap();
@@ -1573,7 +1586,7 @@ mod tests {
 
         let sink = FakeSink::ok();
         let cloud = CloudContext { subscriber: true, sink: Some(&sink), batch_id: "b".into() };
-        let marks = marked(&path, crate::importance::Importance::High);
+        let marks = marked(&path, crate::importance::Importance::Important);
         let report = run_cleanup_full(
             CleanupRequest {
                 items: vec![item(&path, Category::LargeFile, Disposition::CloudBackup)],
