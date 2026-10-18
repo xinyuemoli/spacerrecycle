@@ -345,7 +345,7 @@ where
         };
     }
 
-    let addon = cfg.subscription_addon_store_id.trim();
+    let addon = cfg.subscription_addon_store_id();
     if addon.is_empty() {
         return Entitlement {
             subscriber: false,

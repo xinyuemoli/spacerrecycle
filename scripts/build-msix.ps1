@@ -31,9 +31,21 @@
     Human-readable publisher name shown to users. Must match
     Package/Identity/PublisherDisplayName from the same panel.
 
+.PARAMETER AddonStoreId
+    Product ID of the subscription add-on, compiled into the binary as
+    DEFAULT_SUBSCRIPTION_ADDON_STORE_ID. Defaults to $env:SPACERECYCLE_ADDON_ID.
+
+    Leaving this empty is allowed - the package still builds and certifies -
+    but read the warning the script prints, because the gate then never closes.
+
+.PARAMETER GraphClientId
+    Azure application (client) ID for the OneDrive device-code flow, compiled in
+    as DEFAULT_GRAPH_CLIENT_ID. Defaults to $env:SPACERECYCLE_GRAPH_CLIENT_ID.
+
 .EXAMPLE
     .\scripts\build-msix.ps1
     .\scripts\build-msix.ps1 -Version 0.2.0.0 -SkipBuild
+    .\scripts\build-msix.ps1 -AddonStoreId SpaceRecyclePro -GraphClientId 00000000-1111-2222-3333-444444444444
 #>
 [CmdletBinding()]
 param(
@@ -41,6 +53,8 @@ param(
     [string]$PackageName      = "SpaceRecycle",
     [string]$Publisher        = "CN=xinyuemoli",
     [string]$PublisherDisplay = "SpaceRecycle",
+    [string]$AddonStoreId     = $env:SPACERECYCLE_ADDON_ID,
+    [string]$GraphClientId    = $env:SPACERECYCLE_GRAPH_CLIENT_ID,
     [switch]$SkipBuild
 )
 
@@ -72,9 +86,42 @@ if ([int]$verParts[3] -ne 0) { throw "Invalid package version '$Version': the fo
 if (-not $SkipBuild) {
     Write-Host "==> cargo build --release" -ForegroundColor Cyan
     Push-Location $tauriDir
-    try { cargo build --release } finally { Pop-Location }
+    try {
+        # The two IDs are compiled in with option_env!, so they have to be in the
+        # environment of the cargo process - not written to a file afterwards.
+        # They are not secrets: the device-code flow uses a public client, so the
+        # client ID is visible in every authorization request anyway, and the
+        # add-on ID is visible to anyone who reads the binary.
+        $env:SPACERECYCLE_ADDON_ID = $AddonStoreId
+        $env:SPACERECYCLE_GRAPH_CLIENT_ID = $GraphClientId
+        cargo build --release
+    } finally {
+        Pop-Location
+        Remove-Item Env:\SPACERECYCLE_ADDON_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:\SPACERECYCLE_GRAPH_CLIENT_ID -ErrorAction SilentlyContinue
+    }
 }
 if (-not (Test-Path $exePath)) { throw "Missing release binary: $exePath (build it first, or drop -SkipBuild)" }
+
+# A Store build with no add-on ID is not a build with the paid tier switched
+# off. It is a build with the paid tier switched ON: the entitlement resolves to
+# NotConfigured, which means "nothing is on sale here", and the app correctly
+# concludes there is nothing to gate. Every paid feature ships free, silently,
+# to everyone - and the only sign is that nobody is ever asked to subscribe.
+# That is a distribution decision, so it is stated plainly rather than left to
+# be discovered after release.
+if ([string]::IsNullOrWhiteSpace($AddonStoreId) -and -not $SkipBuild) {
+    Write-Host ""
+    Write-Host "WARNING: no add-on Store ID was supplied." -ForegroundColor Yellow
+    Write-Host "  The package will be built, but the subscription gate will never" -ForegroundColor Yellow
+    Write-Host "  close: every paid feature is open to every user, for free." -ForegroundColor Yellow
+    Write-Host "  Pass -AddonStoreId <product id> once the add-on exists." -ForegroundColor Yellow
+    Write-Host ""
+}
+if ([string]::IsNullOrWhiteSpace($GraphClientId) -and -not $SkipBuild) {
+    Write-Host "NOTE: no Azure client ID was supplied - OneDrive account linking will" -ForegroundColor Yellow
+    Write-Host "      report itself as unconfigured and the sign-in button stays inert." -ForegroundColor Yellow
+}
 
 Write-Host "==> staging package layout" -ForegroundColor Cyan
 if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force }

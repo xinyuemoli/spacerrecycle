@@ -152,7 +152,52 @@ winapp run src-tauri\target\msix\stage --detach
 
 ### 4.4 仍需人工实测的一项
 
-**UAC 提权路径**：应用有「清理失败时提权重试」（`retry_cleanup_elevated`）。MSIX 应用运行在容器中，自行提权可能受限。需要在打包版上实际触发一次权限失败、点「提权重试」来验证。这是目前唯一无法自动验证的点。
+**UAC 提权路径**：应用有「清理失败时重试提权」（`retry_cleanup_elevated`）。MSIX 应用运行在容器中，自行提权可能受限。需要在打包版上实际触发一次权限失败、点「提权重试」来验证。这是目前唯一无法自动验证的点。
+
+### 4.5 订阅加载项（收费层）
+
+免费层 = 扫描 + 清理 + 本地隔离。订阅层 = OneDrive 隔离 / 云端备份 / 配额 + 重要性标记 + 驱动防护。**一次订阅开全部**，不是按功能收费。
+
+**两个 ID 是编译进二进制的**，用户不需要改任何配置文件：
+
+| 环境变量 | 作用 | 不填的后果 |
+|---|---|---|
+| `SPACERECYCLE_ADDON_ID` | 订阅加载项的 Product ID | ⚠️ 见下方警告 |
+| `SPACERECYCLE_GRAPH_CLIENT_ID` | OneDrive 设备码授权的 Azure 应用 ID | 登录按钮失效并提示"未配置" |
+
+```powershell
+.\scripts\build-msix.ps1 -Version 1.0.1.0 `
+  -AddonStoreId SpaceRecyclePro `
+  -GraphClientId <azure-app-client-id>
+```
+
+#### ⚠️ 不填 AddonStoreId 不会"关掉付费层"，而是"送掉付费层"
+
+没编译进加载项 ID 时，权益判定落到 `NotConfigured`，语义是**"这里没有东西可卖"**，于是应用正确地认为**没有东西需要拦**——`paid_features_open()` 返回 `true`，**所有付费功能对所有人免费开放**。
+
+这是刻意的设计：非商店版（GitHub 直接下载）本来就不该收费，所以"没有可卖的东西"必须等于"全开"，否则 GitHub 版会把用户看得见的功能锁死。但它同时意味着**商店版忘记填 ID = 静默白送**。
+
+`scripts/build-msix.ps1` 在这种情况下会打印醒目警告。发布前确认没有这条警告。
+
+#### 加载项创建流程
+
+1. Partner Center → 你的应用 → **加载项** → **创建新加载项**
+2. **产品类型**：Subscription
+3. **产品 ID**：自己取（如 `SpaceRecyclePro`）——**发布后不可更改**
+4. **内容类型**：电子软件下载
+5. **订阅周期**（月 / 3月 / 6月 / 年 / 24月）与**免费试用**（1周 / 1月）——**发布后均不可更改**
+6. 提交并发布，然后把这个 Product ID 填进 `-AddonStoreId`
+
+#### 权益判定的三态
+
+| 情形 | `source` | 付费功能 | 设置页显示 |
+|---|---|---|---|
+| 从商店安装且已订阅 | `store` / `cache` | 开放 | "已订阅" |
+| 从商店安装但未订阅 | `store` | 关闭 | 引导订阅 |
+| 直接跑 exe（GitHub 版） | `unpackaged` | **开放** | "此副本非商店版" |
+| 商店版但没编进加载项 ID | `not_configured` | **开放** ⚠️ | "订阅尚未开卖" |
+
+`is_subscriber()` 与"功能是否开放"是**两件事**：前者只在前两行及 `dev_override` 时为真，所以"没有东西可卖"的构建不会在设置页谎称用户已订阅。
 
 ---
 

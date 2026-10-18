@@ -70,7 +70,7 @@ pub struct ConnectPoll {
 
 fn graph_config() -> Result<Config, String> {
     let cfg = Config::load();
-    if cfg.graph_client_id.trim().is_empty() {
+    if cfg.graph_client_id().is_empty() {
         return Err(
             "未配置 Azure 应用（client）ID，无法连接 OneDrive。请在设置中填入 graphClientId。"
                 .to_string(),
@@ -84,7 +84,7 @@ fn graph_config() -> Result<Config, String> {
 pub async fn graph_connect_start(state: State<'_, GraphState>) -> Result<ConnectInfo, String> {
     let cfg = graph_config()?;
     let now = crate::license::now_unix();
-    let client_id = cfg.graph_client_id.clone();
+    let client_id = cfg.graph_client_id().to_string();
     let session = offload(move || {
         crate::cloud::account::begin(&crate::cloud::graph::WinHttp, &client_id, now)
     })
