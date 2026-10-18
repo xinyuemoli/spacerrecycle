@@ -21,17 +21,30 @@
 
 <main class="section policy">
   <h1 data-i18n="privacy_h1">Privacy Policy</h1>
-  <p class="updated" data-i18n="privacy_updated">Last updated: September 30, 2026</p>
-  <p data-i18n="privacy_intro">SpaceRecycle is built around a simple promise: <strong>it never does anything on your device without you asking.</strong> This page explains exactly what that means for your data.</p>
+  <p class="updated" data-i18n="privacy_updated">Last updated: October 18, 2026</p>
+  <p data-i18n="privacy_intro">SpaceRecycle is built around a simple promise: <strong>it never does anything on your device without you asking.</strong> This page explains exactly what that means for your data — including the two optional features that talk to Microsoft on your behalf.</p>
 
-  <h2 data-i18n="privacy_app_h2">The desktop app collects nothing</h2>
+  <h2 data-i18n="privacy_app_h2">What the app does on your machine</h2>
   <ul class="points">
     <li data-i18n="privacy_app_1"><strong>No telemetry.</strong> The app sends no usage data, analytics, or crash reports anywhere.</li>
-    <li data-i18n="privacy_app_2"><strong>No account.</strong> There is no sign-up, no login, and no cloud service.</li>
-    <li data-i18n="privacy_app_3"><strong>Everything stays on your machine.</strong> Scanning, cleanup, the quarantine store, and the audit log all happen locally. Nothing is uploaded.</li>
-    <li data-i18n="privacy_app_4"><strong>No network requests for your data.</strong> Your file names, paths, and usage are never transmitted to us or anyone else.</li>
+    <li data-i18n="privacy_app_2"><strong>No account needed.</strong> Scanning, cleanup and the local quarantine work with no sign-in of any kind. The optional OneDrive features below are the only thing that ever asks you to sign in.</li>
+    <li data-i18n="privacy_app_3"><strong>Scanning, cleanup, the quarantine store and the audit log all happen locally.</strong> They are written to your own disk and sent nowhere.</li>
+    <li data-i18n="privacy_app_4"><strong>We run no server.</strong> There is nothing of ours for the app to report to, and your file names, paths and usage are never transmitted to us.</li>
   </ul>
-  <p data-i18n="privacy_app_local">The only files the app creates live on your own disk: the quarantine store (default <code>%ProgramData%\SpaceRecycle\Quarantine</code>), the audit log, and its config file. You can inspect, export, or delete all of them at any time.</p>
+  <p data-i18n="privacy_app_local">The files the app creates live on your own disk: the quarantine store (default <code>%ProgramData%\SpaceRecycle\Quarantine</code>), the audit log, and its config file. You can inspect, export, or delete all of them at any time.</p>
+
+  <h2 data-i18n="privacy_cloud_h2">Optional: connecting your OneDrive</h2>
+  <p data-i18n="privacy_cloud_p">Cloud backup and OneDrive quarantine let you keep an item in your own OneDrive instead of on this disk. <strong>Nothing here happens unless you connect an account yourself</strong>, and you can disconnect at any time from Settings.</p>
+  <ul class="points">
+    <li data-i18n="privacy_cloud_1"><strong>Limited permission.</strong> The app asks for <code>Files.ReadWrite.AppFolder</code>. That grants access to <em>one folder of its own</em> inside your OneDrive and nothing else — it cannot read, list, or change any other file you have there.</li>
+    <li data-i18n="privacy_cloud_2"><strong>Cloud quota.</strong> It reads how much space your OneDrive has left, so it can show that number and check an upload will fit.</li>
+    <li data-i18n="privacy_cloud_3"><strong>Uploads go to your own OneDrive.</strong> When you choose to back an item up or quarantine it to the cloud, the files are uploaded to <code>Apps/SpaceRecycle Backup/</code> in <em>your</em> drive.</li>
+    <li data-i18n="privacy_cloud_4"><strong>We never receive any of it.</strong> The transfer is between your device and Microsoft's servers. We have no server, no copy, and no way to read your files.</li>
+    <li data-i18n="privacy_cloud_5"><strong>The sign-in credential stays on your machine</strong>, encrypted with Windows DPAPI in <code>%APPDATA%\SpaceRecycle\auth.bin</code>. Disconnecting the account deletes it.</li>
+  </ul>
+
+  <h2 data-i18n="privacy_sub_h2">Subscription checks</h2>
+  <p data-i18n="privacy_sub_p">Some features require a subscription, bought through the Microsoft Store. The app asks the Store whether your subscription is active; <strong>Microsoft handles that check and the payment, and we never see your payment details.</strong> The only thing kept locally is whether the subscription was valid and when it was last checked.</p>
 
   <h2 data-i18n="privacy_site_h2">This website</h2>
   <p data-i18n="privacy_site_p">The website uses <strong>Cloudflare Web Analytics</strong>, a cookie-less, privacy-first analytics service. It reports aggregate page views and visits only — no cookies, no fingerprinting, no cross-site tracking, and no personal data stored. The site is fully static: no accounts, no forms, no comments.</p>
@@ -40,7 +53,7 @@
   <p data-i18n="privacy_dl_p">Installers are served by GitHub Releases. GitHub may record the download under <a href="https://docs.github.com/en/site-policy/privacy-policies/github-privacy-statement">GitHub's Privacy Statement</a>. We only ever see an aggregate download count.</p>
 
   <h2 data-i18n="privacy_children_h2">Children's privacy</h2>
-  <p data-i18n="privacy_children_p">Neither the app nor the website collects personal data from anyone, including children.</p>
+  <p data-i18n="privacy_children_p">We do not knowingly collect personal data from anyone, including children. The app has no mechanism for sending us data at all.</p>
 
   <h2 data-i18n="privacy_changes_h2">Changes</h2>
   <p data-i18n="privacy_changes_p">If this policy changes, the new version will be published on this page.</p>
