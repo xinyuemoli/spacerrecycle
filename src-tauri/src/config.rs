@@ -62,8 +62,21 @@ pub struct Config {
     /// silently override the built-in one.
     pub subscription_addon_store_id: String,
     /// Development only: treat this build as subscribed without asking the
-    /// Store. Documented as such because it is also the documented way to
-    /// exercise the subscriber path on a machine with no Store identity.
+    /// Store, so the subscriber path can be exercised on a machine with no
+    /// Store identity.
+    ///
+    /// **Compiled out unless the `dev-entitlement` feature is on**, which is why
+    /// the field itself is behind a `cfg`. It used to be a plain config key that
+    /// worked in every build, and that made it a licensing hole rather than a
+    /// development aid: one line added to `%APPDATA%\SpaceRecycle\config.json`
+    /// with Notepad, in the Store build, unlocked every paid feature with
+    /// nothing on screen to say so.
+    ///
+    /// With the feature off the field does not exist, so a config file
+    /// containing the key loads with the key ignored - serde skips unknown
+    /// fields - and saving the config drops it. That is the intended behaviour:
+    /// a release build should not carry a switch it will never honour.
+    #[cfg(feature = "dev-entitlement")]
     pub dev_subscriber_override: bool,
     /// Azure application (client) ID used for the OneDrive device-code flow.
     ///
@@ -125,6 +138,7 @@ impl Default for Config {
             quarantine_target: QuarantineTarget::Local,
             extra_excluded_roots: Vec::new(),
             subscription_addon_store_id: String::new(),
+            #[cfg(feature = "dev-entitlement")]
             dev_subscriber_override: false,
             graph_client_id: String::new(),
         }
@@ -318,11 +332,57 @@ mod tests {
         let mut cfg = Config::default();
         cfg.quarantine_target = QuarantineTarget::OneDrive;
         cfg.subscription_addon_store_id = "SpaceRecyclePro".to_string();
-        cfg.dev_subscriber_override = true;
         let json = serde_json::to_string(&cfg).expect("serializes");
         let back: Config = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back.quarantine_target, cfg.quarantine_target);
         assert_eq!(back.subscription_addon_store_id(), "SpaceRecyclePro");
+    }
+
+    /// The development override round-trips when it exists.
+    ///
+    /// Gated, because with the feature off the field is not in the struct at
+    /// all - which is the point of the gate, and would otherwise make this test
+    /// stop compiling rather than stop being relevant.
+    #[cfg(feature = "dev-entitlement")]
+    #[test]
+    fn the_dev_override_round_trips_when_it_exists() {
+        let mut cfg = Config::default();
+        cfg.dev_subscriber_override = true;
+        let json = serde_json::to_string(&cfg).expect("serializes");
+        let back: Config = serde_json::from_str(&json).expect("deserializes");
         assert!(back.dev_subscriber_override);
+    }
+
+    /// A release build ignores the key rather than carrying a switch it will
+    /// never honour.
+    ///
+    /// This is the test for the hole being closed: a config file that somebody
+    /// edited with Notepad to unlock the paid features has to load, and has to
+    /// leave the app unsubscribed. Silently ignoring is the intended outcome -
+    /// serde skips unknown fields, so the file stays valid and the app starts.
+    #[cfg(not(feature = "dev-entitlement"))]
+    #[test]
+    fn a_config_claiming_the_dev_override_is_ignored_without_the_feature() {
+        let json = r#"{"devSubscriberOverride":true}"#;
+        let cfg: Config = serde_json::from_str(json).expect("an unknown key must not break loading");
+
+        // The field does not exist, so the only way to assert it did nothing is
+        // through what it would have changed. With no add-on configured this is
+        // `NotConfigured`, and with one it is the Store answer - never the
+        // override.
+        let e = crate::license::entitlement_with_addon(
+            "SpaceRecyclePro",
+            &cfg,
+            1,
+            |_| crate::license::StoreAnswer::Inactive,
+            false,
+            true,
+        );
+        assert_ne!(
+            e.source,
+            crate::license::EntitlementSource::DevOverride,
+            "a config key unlocked the paid features in a build without the feature"
+        );
+        assert!(!e.subscriber);
     }
 }

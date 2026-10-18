@@ -199,6 +199,32 @@ winapp run src-tauri\target\msix\stage --detach
 
 `is_subscriber()` 与"功能是否开放"是**两件事**：前者只在前两行及 `dev_override` 时为真，所以"没有东西可卖"的构建不会在设置页谎称用户已订阅。
 
+#### 自己测试付费路径：不需要买订阅
+
+`dev_override` 让构建在不问商店的情况下解锁付费功能，用来在**没有订阅的账号**上测订阅路径。
+
+**它现在编译在 `dev-entitlement` feature 后面，默认关闭。** 以前它是个普通配置项，任何构建都生效——那意味着任何用户拿记事本往 `%APPDATA%\SpaceRecycle\config.json` 里加一行 `"devSubscriberOverride": true`，商店版就会**白送全部付费功能**，没有任何提示。
+
+```powershell
+# 测试包（自己用）
+.\scripts\build-msix.ps1 -Version 1.0.5.0 -DevEntitlement
+
+# 上架包（绝不要带这个参数）
+.\scripts\build-msix.ps1 -Version 1.0.5.0
+```
+
+| | feature 关闭（商店版） | feature 打开（测试版） |
+|---|---|---|
+| 配置里写 `devSubscriberOverride` | **被忽略**（字段不存在） | 解锁全部付费功能 |
+| `source` | 按商店结果 | `dev_override` |
+| 设置页 | "未订阅" | 明写是开发覆盖 |
+
+关闭时 `Config` 结构体里**根本没有这个字段**，所以配置文件里的那一行会被 serde 跳过，保存配置时顺手丢掉——发布版不该带着一个自己永远不会执行的开关。
+
+`build-msix.ps1` 会在构建后**检查二进制里有没有那段字符串**，不匹配就报错：带了 `-DevEntitlement` 却没编进去、或者没带参数却编进去了（通常是残留的旧二进制），都会被拦下。
+
+`scripts/check-all.ps1` 会分别用两种配置各跑一遍测试，并检查 `target\release` 里的二进制是否残留后门。
+
 ---
 
 ## 交付物清单（本次已完成）

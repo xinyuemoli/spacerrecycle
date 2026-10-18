@@ -124,7 +124,7 @@ pub enum Category { ..., CloudPlaceholder }
 
 - 校验方式：`Windows.Services.Store` 的 `StoreContext.GetAppLicenseAsync()`，在 `AddOnLicenses` 中查找订阅加载项 Store ID。
 - **前置条件**：需要 MSIX 包标识。开发态（未打包）无法校验，回退策略：
-  - 配置项 `devSubscriberOverride`（默认 false）用于本地开发调试；
+  - 配置项 `devSubscriberOverride`（默认 false）用于本地开发调试。**构建时须加 `dev-entitlement` feature**（`build-msix.ps1 -DevEntitlement`）；不加则该字段不存在于 `Config`，配置里写了也会被忽略。见 `docs/publishing.md` §4.5；
   - 校验不可用时按"未订阅"处理，不阻断非订阅功能。
 - 缓存：`%APPDATA%\SpaceRecycle\entitlement.json`，含 `checkedUnix`、`expiresUnix`。
 - 宽限期：校验暂时不可用（离线）时，保留最近一次成功结果若干天，避免订阅用户离线被误判。

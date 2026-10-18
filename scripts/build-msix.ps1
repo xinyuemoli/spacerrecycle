@@ -42,10 +42,22 @@
     Azure application (client) ID for the OneDrive device-code flow, compiled in
     as DEFAULT_GRAPH_CLIENT_ID. Defaults to $env:SPACERECYCLE_GRAPH_CLIENT_ID.
 
+.PARAMETER DevEntitlement
+    Builds with the `dev-entitlement` feature, which unlocks the paid features
+    without asking the Store so the subscriber path can be tested on an account
+    that does not own the add-on.
+
+    Off by default, and it must stay off for anything submitted to the Store.
+    With the feature off there is no code path to the override at all: a config
+    file claiming `devSubscriberOverride` is ignored, because the field it would
+    set is not compiled in. That is the difference between a switch an ordinary
+    user can find in Notepad and one that needs a rebuild.
+
 .EXAMPLE
     .\scripts\build-msix.ps1
     .\scripts\build-msix.ps1 -Version 0.2.0.0 -SkipBuild
     .\scripts\build-msix.ps1 -AddonStoreId SpaceRecyclePro -GraphClientId 00000000-1111-2222-3333-444444444444
+    .\scripts\build-msix.ps1 -Version 1.0.4.0 -DevEntitlement
 #>
 [CmdletBinding()]
 param(
@@ -55,6 +67,7 @@ param(
     [string]$PublisherDisplay = "SpaceRecycle",
     [string]$AddonStoreId     = $env:SPACERECYCLE_ADDON_ID,
     [string]$GraphClientId    = $env:SPACERECYCLE_GRAPH_CLIENT_ID,
+    [switch]$DevEntitlement,
     [switch]$SkipBuild
 )
 
@@ -122,7 +135,11 @@ if (-not $SkipBuild) {
         # $LASTEXITCODE is the only thing that actually says whether it worked,
         # so it is checked explicitly rather than inferred from the absence of an
         # exception - which is precisely the inference that was wrong here.
-        & cmd.exe /c "cargo build --release 2>&1" | ForEach-Object { Write-Host "    $_" }
+        #
+        # The feature flag is appended rather than baked into the command so that
+        # the ordinary build's command line is visibly the one without it.
+        $featureArg = if ($DevEntitlement) { " --features dev-entitlement" } else { "" }
+        & cmd.exe /c "cargo build --release$featureArg 2>&1" | ForEach-Object { Write-Host "    $_" }
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build --release failed with exit code $LASTEXITCODE"
         }
@@ -133,6 +150,24 @@ if (-not $SkipBuild) {
     }
 }
 if (-not (Test-Path $exePath)) { throw "Missing release binary: $exePath (build it first, or drop -SkipBuild)" }
+
+# The feature has to be visible in the binary, and its absence has to be
+# checkable, because the whole point is that a Store build cannot honour the
+# override even if a user asks it to.
+#
+# Checked by string rather than by trusting the flag: this catches the case the
+# flag would not - a stale binary from an earlier -DevEntitlement build, or a
+# feature enabled by something other than this parameter.
+if (-not $SkipBuild) {
+    $marker = "development override is enabled in the config file"
+    $carries = (Select-String -Path $exePath -Pattern $marker -Encoding utf8 -List -ErrorAction SilentlyContinue) -ne $null
+    if ($DevEntitlement -and -not $carries) {
+        throw "the dev-entitlement feature was requested but the binary does not carry it"
+    }
+    if (-not $DevEntitlement -and $carries) {
+        throw "this binary carries the dev entitlement override but was built without the feature - do not submit it"
+    }
+}
 
 # What the binary will actually use, which is the parameter when it was given
 # and the value compiled into config.rs otherwise.
@@ -170,6 +205,20 @@ if ([string]::IsNullOrWhiteSpace($effectiveAddonId)) {
 if ([string]::IsNullOrWhiteSpace($GraphClientId)) {
     Write-Host "NOTE: no Azure client ID was supplied - OneDrive account linking will" -ForegroundColor Yellow
     Write-Host "      report itself as unconfigured and the sign-in button stays inert." -ForegroundColor Yellow
+}
+
+# Loud, because this package gives the paid tier away to anyone who sets one
+# config key, and because the only thing standing between it and the Store is
+# somebody reading this line.
+if ($DevEntitlement) {
+    Write-Host ""
+    Write-Host "WARNING: built with -DevEntitlement." -ForegroundColor Yellow
+    Write-Host "  This package honours devSubscriberOverride in the config file, so" -ForegroundColor Yellow
+    Write-Host "  every paid feature is unlocked for anyone who edits" -ForegroundColor Yellow
+    Write-Host "  %APPDATA%\SpaceRecycle\config.json." -ForegroundColor Yellow
+    Write-Host "  It is for testing the subscriber path on an account that does not" -ForegroundColor Yellow
+    Write-Host "  own the add-on. DO NOT SUBMIT IT TO THE STORE." -ForegroundColor Red
+    Write-Host ""
 }
 
 Write-Host "==> staging package layout" -ForegroundColor Cyan

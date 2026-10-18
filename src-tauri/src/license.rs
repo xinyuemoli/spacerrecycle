@@ -354,7 +354,16 @@ where
 /// Taking the identifier as an argument is preferable to adding a test-only
 /// field to Config: a production struct should not carry a setting that exists
 /// so that a test can reach a line of code.
-fn entitlement_with_addon<F>(
+///
+/// `pub(crate)` so `config.rs` can assert, from the config side, that a file
+/// claiming the development override does nothing in a build without the
+/// feature. That is a property of the pair, and asserting it from either side
+/// alone would miss half of it.
+// The config is only read on one branch, which is compiled out when the feature
+// is off. Allowing the unused parameter is the honest way to say "this build
+// deliberately does not look at it".
+#[cfg_attr(not(feature = "dev-entitlement"), allow(unused_variables))]
+pub(crate) fn entitlement_with_addon<F>(
     addon: &str,
     cfg: &crate::config::Config,
     now: i64,
@@ -367,7 +376,14 @@ where
 {
     // The development override wins over everything, including an expired
     // subscription: its entire purpose is to unlock the feature on a machine
-    // that has no Store identity at all.
+    // that has no Store identity at all - a test package, usually.
+    //
+    // Entirely compiled out unless the `dev-entitlement` feature is on. When it
+    // was a plain config read, a release build honoured it, and one line added
+    // to the config file with Notepad unlocked every paid feature for free. The
+    // gate an ordinary user cannot pass is "recompile the binary"; a JSON key is
+    // not that.
+    #[cfg(feature = "dev-entitlement")]
     if cfg.dev_subscriber_override {
         return Entitlement {
             subscriber: true,
@@ -615,6 +631,13 @@ mod tests {
         assert_eq!(e.source, EntitlementSource::NotConfigured);
     }
 
+    /// The override short-circuits the Store, and it only exists when the build
+    /// was made with the feature.
+    ///
+    /// Gated rather than deleted: this is the behaviour a test package relies
+    /// on, and leaving it ungated would mean the field it sets does not exist in
+    /// an ordinary build.
+    #[cfg(feature = "dev-entitlement")]
     #[test]
     fn the_dev_override_short_circuits_everything() {
         let cfg = crate::config::Config {
@@ -624,6 +647,19 @@ mod tests {
         let e = entitlement_with(&cfg, 1_000, |_| panic!("must not ask the Store with the override on"));
         assert!(e.subscriber);
         assert_eq!(e.source, EntitlementSource::DevOverride);
+    }
+
+    /// Without the feature there is no input that produces the override.
+    ///
+    /// The variant stays in the enum, because the frontend still has to render a
+    /// label for a value it might be sent, but nothing can construct it. This
+    /// asserts the absence through the one path that used to construct it.
+    #[cfg(not(feature = "dev-entitlement"))]
+    #[test]
+    fn nothing_produces_the_dev_override_without_the_feature() {
+        let cfg = crate::config::Config::default();
+        let e = entitlement_with(&cfg, 1_000, |_| StoreAnswer::Inactive);
+        assert_ne!(e.source, EntitlementSource::DevOverride);
     }
 
     #[test]
@@ -844,8 +880,10 @@ mod tests {
 
     #[test]
     fn a_fresh_positive_cache_skips_the_store_call() {
-        let mut cfg = cfg_with_addon();
-        cfg.dev_subscriber_override = false;
+        let cfg = cfg_with_addon();
+        // The override is not disabled here: with the feature off the field does
+        // not exist, and with it on the default is already false. Clearing a
+        // flag that may not be there was how this line ended up existing twice.
         // A cache written by the live path is what makes this reachable; here
         // the check is exercised directly so the test does not depend on the
         // machine's real %APPDATA%.

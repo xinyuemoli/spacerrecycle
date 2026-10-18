@@ -41,6 +41,25 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 
+[features]
+# Unlocks the paid features without asking the Store, for testing.
+#
+# **Off by default, and that is the whole point.** The override used to be a
+# config-file flag that worked in every build, which meant any user could open
+# `%APPDATA%\SpaceRecycle\config.json` in Notepad, add one line, and receive
+# every paid feature for free - in the Store build, with no prompt and nothing on
+# screen to say so. The gate needs to be one an ordinary user cannot pass, and
+# "recompile the binary" is that gate while a JSON key is not.
+#
+# Build with it for a test package:
+#
+#     cargo build --release --features dev-entitlement
+#     .\scripts\build-msix.ps1 -Version X ... -DevEntitlement
+#
+# The lock screen and the entitlement detail both say the override is on, so a
+# build carrying it cannot be mistaken for an ordinary one.
+dev-entitlement = []
+
 [profile.release]
 opt-level = "z"
 lto = true
