@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod engine;
 pub mod guard;
+pub mod hold;
 pub mod importance;
 pub mod license;
 pub mod log;
@@ -67,6 +68,24 @@ pub fn run() {
     tauri::Builder::default()
         .manage(ScanState::default())
         .manage(GraphState::default())
+        .setup(|_app| {
+            // Restore the hold guard at startup.
+            //
+            // A held handle lives only as long as the process holding it, so
+            // protection does not survive the app being closed and reopened. The
+            // marks are on disk, so the guard is rebuilt from them rather than
+            // from anything remembered - and only if the disposition says the
+            // guard is standing, or the app would start up protecting files the
+            // user had switched protection off for.
+            //
+            // Failures are not logged or printed here: they are held for
+            // protection_status to report, which is the screen where somebody is
+            // actually asking whether their files are protected.
+            if crate::guard::read() != crate::guard::Disposition::Allow {
+                crate::protection::sync_holds_from_marks();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_volumes,
             commands::get_config,

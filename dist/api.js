@@ -30,6 +30,15 @@ const stubGuard = {
   configured: false,
 };
 
+// Which mechanism is protecting files. Separate from stubGuard because the two
+// answer different questions, and the guard card reads this one: no driver
+// service does not mean nothing is protected.
+const stubProtection = {
+  kind: "hold",
+  active: true,
+  detail: "the guard is on, but no file is currently held",
+};
+
 // Settings are kept the same way as the guard disposition above: the stub
 // remembers what was saved so the quarantine-target choice survives a re-render
 // when the UI is opened without a backend.
@@ -53,6 +62,7 @@ function stub(cmd, args) {
     case "list_quarantine_batches": return [];
     case "list_importance": return [];
     case "guard_status": return Object.assign({}, stubGuard);
+    case "protection_status": return Object.assign({}, stubProtection);
     case "set_guard_disposition":
       // Rejecting an unknown value is what the real backend does too - the
       // Rust side deserialises into a three-variant enum - so having the stub

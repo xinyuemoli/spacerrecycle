@@ -332,6 +332,39 @@ pub fn entitlement_with_opts<F>(
 where
     F: FnOnce(&str) -> StoreAnswer,
 {
+    entitlement_with_addon(
+        cfg.subscription_addon_store_id(),
+        cfg,
+        now,
+        ask,
+        use_fresh_cache,
+        packaged,
+    )
+}
+
+/// The decision itself, with the add-on identifier passed in rather than read
+/// from the config.
+///
+/// The seam exists so the "there is nothing on sale here" branch stays
+/// reachable. That branch needs an empty identifier, and since the real Product
+/// ID is now compiled in as the default, an empty one is no longer something a
+/// Config can produce - which would have left the branch untested and the tests
+/// testing it quietly deleted.
+///
+/// Taking the identifier as an argument is preferable to adding a test-only
+/// field to Config: a production struct should not carry a setting that exists
+/// so that a test can reach a line of code.
+fn entitlement_with_addon<F>(
+    addon: &str,
+    cfg: &crate::config::Config,
+    now: i64,
+    ask: F,
+    use_fresh_cache: bool,
+    packaged: bool,
+) -> Entitlement
+where
+    F: FnOnce(&str) -> StoreAnswer,
+{
     // The development override wins over everything, including an expired
     // subscription: its entire purpose is to unlock the feature on a machine
     // that has no Store identity at all.
@@ -345,7 +378,6 @@ where
         };
     }
 
-    let addon = cfg.subscription_addon_store_id();
     if addon.is_empty() {
         return Entitlement {
             subscriber: false,
@@ -553,11 +585,32 @@ mod tests {
         }
     }
 
+    /// The "there is nothing on sale here" state, reached deliberately.
+    ///
+    /// `entitlement_with` can no longer produce it. The real Store product ID is
+    /// compiled in as the default, so a Config with an empty field now resolves
+    /// to that ID rather than to nothing - which is the point of the default,
+    /// and also the reason this helper exists instead of four tests quietly
+    /// losing their coverage.
+    ///
+    /// The state is still reachable in reality: a build with the environment
+    /// override set to empty produces exactly this. It is the accidentally
+    /// unconfigured build that the compiled-in default now prevents.
+    fn unconfigured(cfg: &crate::config::Config, now: i64) -> Entitlement {
+        entitlement_with_addon(
+            "",
+            cfg,
+            now,
+            |_| panic!("must not ask the Store when there is no add-on"),
+            false,
+            true,
+        )
+    }
+
     #[test]
     fn an_unconfigured_addon_is_not_a_subscription() {
         let cfg = crate::config::Config::default();
-        assert!(cfg.subscription_addon_store_id.is_empty());
-        let e = entitlement_with(&cfg, 1_000, |_| panic!("must not ask the Store when unconfigured"));
+        let e = unconfigured(&cfg, 1_000);
         assert!(!e.subscriber);
         assert_eq!(e.source, EntitlementSource::NotConfigured);
     }
@@ -606,8 +659,7 @@ mod tests {
     #[test]
     fn an_unconfigured_build_leaves_the_paid_features_open() {
         let cfg = crate::config::Config::default();
-        assert!(cfg.subscription_addon_store_id.is_empty());
-        let e = entitlement_with(&cfg, 1_000, |_| panic!("must not ask the Store when unconfigured"));
+        let e = unconfigured(&cfg, 1_000);
 
         assert!(!e.subscriber, "nobody is paying before anything is on sale");
         assert_eq!(e.source, EntitlementSource::NotConfigured);
@@ -621,7 +673,7 @@ mod tests {
     #[test]
     fn being_open_is_not_the_same_as_being_subscribed() {
         let cfg = crate::config::Config::default();
-        let e = entitlement_with(&cfg, 1_000, |_| panic!("unconfigured"));
+        let e = unconfigured(&cfg, 1_000);
         assert!(e.paid_features_open());
         assert!(
             !e.is_subscriber(),
@@ -712,10 +764,11 @@ mod tests {
     /// "nothing is on sale yet" is about the product.
     #[test]
     fn the_two_nothing_on_sale_reasons_stay_distinguishable() {
-        let packaged_but_unsold = crate::config::Config::default();
-        let a = entitlement_with(&packaged_but_unsold, 1_000, |_| panic!("unconfigured"));
+        // Packaged, but with no add-on: the product has nothing for sale.
+        let a = unconfigured(&crate::config::Config::default(), 1_000);
         assert_eq!(a.source, EntitlementSource::NotConfigured);
 
+        // Has an add-on, but this process is not a Store package.
         let cfg = crate::config::Config {
             subscription_addon_store_id: "9ABCDEF12345".to_string(),
             ..Default::default()

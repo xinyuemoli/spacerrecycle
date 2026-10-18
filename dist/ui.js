@@ -935,13 +935,39 @@ function guardCard() {
   // feature they can plainly see.
   const guardAllowed = !!(state.entitlement && state.entitlement.guardAllowed);
 
-  let status = "";
-  if (!g.unknown) {
-    status = !g.serviceInstalled
-      ? T("set.guard.notInstalled")
-      : (g.serviceRunning ? T("set.guard.active") : T("set.guard.installedNotRunning"));
+  // What is protecting files, taken from protection_status rather than from the
+  // service state.
+  //
+  // The two are not the same question any more. `state.guard` describes the
+  // resident driver service; protection can now also come from files held open
+  // by this process, which needs no service at all. Reading the service state
+  // and reporting "nothing is protected" was correct while the driver was the
+  // only mechanism and became a lie the moment it was not - it told the user
+  // their files were exposed while every one of them was held open.
+  const prot = state.protection || null;
+  const kind = prot ? prot.kind : "none";
+  const protDetail = prot ? prot.detail : "";
+
+  let status;
+  let health;
+  if (!prot) {
+    // The status could not be read, which is not the same as there being none.
+    // Saying nothing beats asserting either way.
+    status = "";
+    health = "";
+  } else if (kind === "none") {
+    status = protDetail || T("set.guard.notInstalled");
+    health = "warn";
+  } else if (kind === "driver") {
+    // The driver's health is the service's health.
+    status = protDetail;
+    health = g.unknown ? "" : g.serviceRunning ? "ok" : "warn";
+  } else {
+    // A held handle: the mechanism is up whenever the process is, and the detail
+    // carries the part that matters - how many files are actually being held.
+    status = protDetail;
+    health = "ok";
   }
-  const health = g.unknown ? "" : (g.serviceRunning ? "ok" : "warn");
 
   // Two of the three dispositions turn the guard on and are therefore the paid
   // part. The third stands it down, and standing down is never gated - refusing

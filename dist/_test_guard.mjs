@@ -81,13 +81,21 @@ check("no other disposition is checked",
   !html.includes('value="allow" data-act="guard" checked'));
 
 // ---- The status is shown, not assumed ----
+//
+// The card reads protection_status, not the service state. They are different
+// questions: no driver service does not mean nothing is protected, because a
+// held handle protects a file with no service at all. The first version of this
+// card read the service state and announced "nothing is protected" while every
+// marked file was in fact held open.
 
-check("an uninstalled service is called out",
-  html.includes("\u5b88\u62a4\u670d\u52a1\u672a\u5b89\u88c5"), "must not look like a working guard");
-check("the uninstalled warning says nothing is protected",
-  html.includes("\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4"));
+S.protection = { kind: "none", active: false, detail: "\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4\u53ef\u7528" };
+await ui.render();
+html = doc();
+check("no mechanism at all is called out",
+  html.includes("\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4"), "must not look like a working guard");
 
 S.guard = { serviceInstalled: true, serviceRunning: true, policyPath: "C:\\p.ini", disposition: "ask", configured: true };
+S.protection = { kind: "driver", active: true, detail: "\u5b88\u62a4\u670d\u52a1\u8fd0\u884c\u4e2d" };
 await ui.render();
 html = doc();
 check("a running service is reported as running",
@@ -96,14 +104,45 @@ check("no warning while it is running",
   !html.includes("\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4"));
 
 S.guard = { serviceInstalled: true, serviceRunning: false, policyPath: "C:\\p.ini", disposition: "ask", configured: true };
+S.protection = { kind: "driver", active: true, detail: "\u5df2\u5b89\u88c5\u4f46\u672a\u8fd0\u884c\u2014\u2014\u5f53\u524d\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4" };
 await ui.render();
 html = doc();
 check("installed but stopped is called out as unprotected",
   html.includes("\u5df2\u5b89\u88c5\u4f46\u672a\u8fd0\u884c") && html.includes("\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4"));
 
+// ---- The user-mode hold backend ----
+//
+// The case that made the old card wrong: a mechanism that protects files
+// without any service, which the service-shaped card could not describe.
+
+S.guard = { serviceInstalled: false, serviceRunning: false, policyPath: "", disposition: "ask", configured: true };
+S.protection = { kind: "hold", active: true, detail: "3 marked files are held open, so they cannot be deleted" };
+await ui.render();
+html = doc();
+check("a service-less mechanism is not reported as no protection",
+  !html.includes("\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4"),
+  "the warning is about the driver service and does not apply to a held handle");
+check("the hold status is shown instead", html.includes("held open"));
+
+// The count is what says whether anything is actually protected, so a hold that
+// is up with nothing held has to read differently from one holding files.
+S.protection = { kind: "hold", active: true, detail: "the guard is on, but no file is currently held" };
+await ui.render();
+html = doc();
+check("a hold with nothing held says so rather than claiming protection",
+  html.includes("no file is currently held"));
+
+S.protection = { kind: "hold", active: true, detail: "2 could not be protected: C:\\x (access denied)" };
+await ui.render();
+html = doc();
+check("files that could not be protected are named",
+  html.includes("could not be protected") && html.includes("access denied"),
+  "a count alone leaves the user unable to find which mark is not working");
+
 // ---- Changing the disposition ----
 
 S.guard = { serviceInstalled: true, serviceRunning: true, policyPath: "C:\\p.ini", disposition: "ask", configured: true };
+S.protection = { kind: "driver", active: true, detail: "\u5b88\u62a4\u670d\u52a1\u8fd0\u884c\u4e2d" };
 await st.actions.setGuardDisposition("deny");
 check("the new disposition is what the backend now reports",
   S.guard.disposition === "deny", "got " + S.guard.disposition);
@@ -158,6 +197,9 @@ S.entitlement = {
   cloudAllowed: false, importanceAllowed: false, guardAllowed: false,
 };
 S.guard = { serviceInstalled: false, serviceRunning: false, disposition: "ask", configured: true };
+// No mechanism at all, so the unprotected warning applies and the paid reason
+// has to sit alongside it rather than replace it.
+S.protection = { kind: "none", active: false, detail: "\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4\u53ef\u7528" };
 await ui.render();
 html = doc();
 
@@ -184,6 +226,7 @@ S.entitlement = {
   subscriber: false, source: "unpackaged",
   cloudAllowed: true, importanceAllowed: true, guardAllowed: true,
 };
+S.protection = { kind: "hold", active: true, detail: "the guard is on, but no file is currently held" };
 await ui.render();
 html = doc();
 
@@ -192,8 +235,9 @@ check("nothing on sale leaves the paid choices enabled",
   dispoTag("ask"));
 check("and does not claim a subscription is needed",
   !html.includes("\u5220\u9664\u9632\u62a4\u9700\u8981\u6709\u6548\u8ba2\u9605"));
-check("and still reports the service honestly",
-  html.includes("\u5b88\u62a4\u670d\u52a1\u672a\u5b89\u88c5"));
+check("and still reports protection honestly",
+  html.includes("no file is currently held"),
+  "the hold status comes from protection_status, not from the driver service");
 
 S.entitlement = openTier;
 

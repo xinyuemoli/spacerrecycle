@@ -68,8 +68,17 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// A deny entry in the file's ACL. Works with no driver and no certificate.
+    /// A deny entry in the file's ACL.
+    ///
+    /// Kept as a variant because the code exists and the reason it is not used
+    /// belongs somewhere discoverable, but it is **not** selected by `current`.
+    /// Measured: it does not prevent a deletion, because Windows takes the right
+    /// to delete from the parent directory's FILE_DELETE_CHILD as well as from
+    /// the file itself.
     Acl,
+    /// Holding the file open without sharing delete. Needs no driver, no
+    /// certificate and no privilege.
+    Hold,
     /// The kernel minifilter. Needs an EV-signed driver.
     Driver,
     /// Nothing is available.
@@ -271,20 +280,119 @@ fn delete_is_denied(_path: &Path) -> bool {
 
 /// The protection in force on this machine.
 ///
-/// The driver is preferred when it is there: it can prompt, and it covers files
-/// that have never been marked in this app.
+/// The driver is preferred when it is there, because it can *prompt*: it sees
+/// the delete as it happens and can ask the user. A held handle cannot. It only
+/// makes the operation fail, and the user is told by Windows that the file is in
+/// use.
 ///
-/// The ACL backend is deliberately **not** in this chain yet. Its arm/disarm
-/// code is complete, but it could not be shown to prevent a deletion - see the
-/// module note - and arming a permission entry that does not protect anything
-/// would be a change to the user's files for no benefit, reported to them as
-/// protection. It is selected again the moment that is settled, which is a
-/// one-line change here.
+/// With no driver, the hold backend is used. It is user mode, so it needs no
+/// certificate and no elevation, which is what makes a delete guard shippable at
+/// all for an individual developer - see `hold.rs` for why the alternatives do
+/// not work.
+///
+/// The ACL backend is deliberately **not** in this chain. Its arm/disarm code is
+/// complete and its measurement is conclusive: a deny ACE does not stop a
+/// deletion, because the parent directory authorises it. Arming a permission
+/// entry that protects nothing would modify the user's files for no benefit
+/// while reporting protection.
 pub fn current() -> Box<dyn Protection> {
     if crate::guard::driver_is_active() {
         return Box::new(DriverProtection);
     }
-    Box::new(NoProtection)
+    Box::new(HoldProtection)
+}
+
+/// The process-wide set of held handles.
+///
+/// Global on purpose, and it has to be. A `HoldGuard` that is constructed per
+/// call would drop its `File` handles at the end of the call, and the protection
+/// would last exactly as long as the function that set it up - which looks like
+/// a working guard in every test that does not check the file afterwards.
+pub fn holds() -> &'static crate::hold::HoldGuard {
+    static HOLDS: std::sync::OnceLock<crate::hold::HoldGuard> = std::sync::OnceLock::new();
+    HOLDS.get_or_init(crate::hold::HoldGuard::new)
+}
+
+/// Holds files open so that Windows refuses to delete them.
+pub struct HoldProtection;
+
+/// Makes the held set match the marks, and reports what could not be held.
+///
+/// The marks are the source of truth rather than a register kept alongside the
+/// handles: the set of handles is then derived state that cannot drift, and a
+/// restart needs no recovery because the marks are already on disk.
+///
+/// `protects_externally` decides which levels qualify, which today means
+/// `Critical` and is the 重要 side of the two-level model the product is heading
+/// for.
+///
+/// Failures are returned rather than swallowed. A file that could not be held is
+/// unprotected, and a caller that reported success anyway would be telling the
+/// user they are safe when they are not.
+pub fn sync_holds_from_marks() -> Vec<(std::path::PathBuf, String)> {
+    let paths: Vec<std::path::PathBuf> = crate::importance::Store::load()
+        .entries()
+        .into_iter()
+        .filter(|e| e.level.protects_externally())
+        .map(|e| std::path::PathBuf::from(&e.path))
+        .collect();
+    let failures = holds().sync(&paths);
+
+    // Kept so that Settings can name them. A file that could not be held is
+    // unprotected, and the count alone would leave the user to work out which
+    // of their marks is the one not doing anything.
+    if let Ok(mut slot) = sync_failures().lock() {
+        *slot = failures.clone();
+    }
+    failures
+}
+
+/// The files the last sync could not hold, and why.
+pub fn last_sync_failures() -> Vec<(std::path::PathBuf, String)> {
+    sync_failures().lock().map(|f| f.clone()).unwrap_or_default()
+}
+
+fn sync_failures() -> &'static std::sync::Mutex<Vec<(std::path::PathBuf, String)>> {
+    static FAILURES: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, String)>>> =
+        std::sync::OnceLock::new();
+    FAILURES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Releases every hold.
+///
+/// What "allow the delete" means. It goes through `release_all` rather than
+/// `sync_holds_from_marks` with an empty list so that the release does not
+/// depend on the mark store being readable.
+pub fn release_all_holds() -> usize {
+    holds().release_all()
+}
+
+impl Protection for HoldProtection {
+    fn kind(&self) -> Kind {
+        Kind::Hold
+    }
+
+    fn available(&self) -> Result<(), String> {
+        // Always available, and that is the point of the backend: it needs no
+        // service, no driver and no administrator.
+        Ok(())
+    }
+
+    fn arm(&self, path: &Path) -> Result<(), String> {
+        holds().protect(path)
+    }
+
+    fn disarm(&self, path: &Path) -> Result<(), String> {
+        holds().release(path);
+        Ok(())
+    }
+
+    fn is_armed(&self, path: &Path) -> bool {
+        // Asked of the hold set rather than of the filesystem. `delete_is_denied`
+        // would answer a different question - whether *this* process may delete
+        // it - and it can delete a file it is holding, so it would always say no.
+        holds().is_protected(path)
+    }
 }
 
 /// What is in force when neither mechanism is usable.
@@ -363,6 +471,34 @@ pub fn status() -> Status {
             active: true,
             detail: match p.kind() {
                 Kind::Driver => "the guard service is running".to_string(),
+                Kind::Hold => {
+                    // The count is the honest part. `active: true` only says the
+                    // mechanism is usable; the number says whether anything is
+                    // actually being held, which is the question a user looking
+                    // at "protection is on" is really asking.
+                    let held = holds().protected_count();
+                    let failed = last_sync_failures();
+                    let base = match held {
+                        0 => "the guard is on, but no file is currently held".to_string(),
+                        1 => "1 marked file is held open, so it cannot be deleted".to_string(),
+                        n => format!("{n} marked files are held open, so they cannot be deleted"),
+                    };
+                    if failed.is_empty() {
+                        base
+                    } else {
+                        // Named, not counted. "2 files could not be protected" leaves
+                        // the user with no way to find out which two.
+                        format!(
+                            "{base}. {} could not be protected: {}",
+                            failed.len(),
+                            failed
+                                .iter()
+                                .map(|(p, e)| format!("{} ({e})", p.display()))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )
+                    }
+                }
                 Kind::Acl => {
                     "protected by a deny entry in each marked file's permissions".to_string()
                 }

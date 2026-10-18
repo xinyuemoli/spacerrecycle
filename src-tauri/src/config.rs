@@ -78,25 +78,30 @@ pub struct Config {
 
 /// Store ID of the subscription add-on, compiled into the binary.
 ///
-/// Set at build time:
+/// This is the real Product ID from Partner Center, and it is the default
+/// because a build that has to be told its own add-on ID at compile time is a
+/// build that will eventually ship without one. The failure mode is quiet and
+/// expensive: an unconfigured build resolves to `NotConfigured`, which means
+/// "there is nothing on sale here", and the app correctly decides there is
+/// nothing to gate - so every paid feature goes out free to everyone.
+///
+/// The authentication model makes publishing it harmless. The add-on can only
+/// be acquired through the Store, against a package whose identity matches this
+/// product, and the Store checks that itself; knowing the string buys nothing.
+/// It is also visible in the binary regardless.
+///
+/// Overridable at build time, which is what the tests for the override path use:
 ///
 /// ```text
-/// $env:SPACERECYCLE_ADDON_ID="SpaceRecyclePro"; cargo build --release
+/// $env:SPACERECYCLE_ADDON_ID="SomethingElse"; cargo build --release
 /// ```
 ///
-/// Empty when unset, which is the development default and means "nothing is on
-/// sale". A build with no add-on must not behave as though the paid tier were
-/// merely unavailable - see `Entitlement::paid_features_open`, which treats an
-/// unconfigured build as fully open rather than fully closed, so that the
-/// GitHub build and the development build never lock a user out of a feature
-/// they can plainly see.
-///
-/// `option_env!` rather than a runtime lookup so that a shipped binary cannot
-/// be repointed at a different add-on by changing an environment variable, and
-/// so that cargo rebuilds when the value changes.
+/// `option_env!` rather than a runtime lookup so that a shipped binary cannot be
+/// repointed at a different add-on by setting a variable, and so that cargo
+/// rebuilds when the value changes.
 pub const DEFAULT_SUBSCRIPTION_ADDON_STORE_ID: &str = match option_env!("SPACERECYCLE_ADDON_ID") {
     Some(id) => id,
-    None => "",
+    None => "SpaceRecyclePro",
 };
 
 /// Azure application (client) ID for the OneDrive device-code flow, compiled
@@ -253,15 +258,36 @@ mod tests {
     #[test]
     fn the_built_in_values_come_from_the_build_environment() {
         // Not a tautology: it fails if the constants stop being wired to
-        // option_env!, which is the only thing that makes the release build
-        // carry an add-on ID at all.
+        // option_env!, which is the only thing that makes a build able to
+        // override them at all.
         assert_eq!(
             DEFAULT_SUBSCRIPTION_ADDON_STORE_ID,
-            option_env!("SPACERECYCLE_ADDON_ID").unwrap_or("")
+            option_env!("SPACERECYCLE_ADDON_ID").unwrap_or("SpaceRecyclePro")
         );
         assert_eq!(
             DEFAULT_GRAPH_CLIENT_ID,
             option_env!("SPACERECYCLE_GRAPH_CLIENT_ID").unwrap_or("")
+        );
+    }
+
+    /// A build that says nothing about its add-on still knows its add-on.
+    ///
+    /// The alternative - leaving the default empty - means the gate silently
+    /// stops existing for anyone who builds without setting a variable, which
+    /// is the same outcome as forgetting to configure a release. The published
+    /// Store product ID is the right default precisely because forgetting is
+    /// the failure mode worth designing against.
+    #[test]
+    fn an_unconfigured_build_still_knows_the_store_product_id() {
+        // Skipped when the environment overrides it, which is how the override
+        // path is exercised; asserting the literal then would be wrong.
+        if option_env!("SPACERECYCLE_ADDON_ID").is_some() {
+            return;
+        }
+        assert_eq!(DEFAULT_SUBSCRIPTION_ADDON_STORE_ID, "SpaceRecyclePro");
+        assert_eq!(
+            Config::default().subscription_addon_store_id(),
+            "SpaceRecyclePro"
         );
     }
 

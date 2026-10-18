@@ -889,6 +889,20 @@ export const actions = {
     } catch (e) {
       state.guard = null;
     }
+    // Which mechanism is actually protecting files, and how many it is holding.
+    //
+    // Fetched separately from guard_status because they answer different
+    // questions. guard_status is about the resident driver service; protection
+    // is about whether anything is protected, which is now also achievable
+    // without a service at all. The card used to read the service state and
+    // conclude "nothing is protected", which stopped being true the moment the
+    // hold backend existed - and reading the wrong one told the user they were
+    // unprotected while their files were held open.
+    try {
+      state.protection = await invoke("protection_status");
+    } catch (e) {
+      state.protection = null;
+    }
     // Subscription state is only shown here, so it is fetched when this tab
     // opens rather than on every launch: an entitlement check on a packaged
     // build is a Store round trip.

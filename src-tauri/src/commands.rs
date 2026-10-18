@@ -760,7 +760,16 @@ pub async fn set_importance(
         }
         let mut store = crate::importance::Store::load();
         store.set(std::path::Path::new(&path), level);
-        store.save().map_err(|e| format!("无法保存重要级别：{e}"))
+        store.save().map_err(|e| format!("无法保存重要级别：{e}"))?;
+
+        // The mark is stored; now make the guard agree with it. Only when the
+        // guard is actually standing: with the disposition on "allow" the user
+        // has said they do not want deletes blocked, and holding a newly marked
+        // file would override that.
+        if crate::guard::read() != crate::guard::Disposition::Allow {
+            crate::protection::sync_holds_from_marks();
+        }
+        Ok(())
     })
     .await
 }
@@ -781,7 +790,15 @@ pub async fn clear_importance(path: String) -> Result<(), String> {
     offload(move || {
         let mut store = crate::importance::Store::load();
         store.remove(std::path::Path::new(&path));
-        store.save().map_err(|e| format!("无法保存重要级别：{e}"))
+        store.save().map_err(|e| format!("无法保存重要级别：{e}"))?;
+
+        // Release before re-syncing, and by path rather than by rebuilding from
+        // the store. The file being cleared may be the one the store could not
+        // write, and leaving a handle on a file the user has just released is
+        // the one failure of this mechanism that would be immediately visible
+        // to them.
+        let _ = crate::protection::holds().release(std::path::Path::new(&path));
+        Ok(())
     })
     .await
 }
@@ -812,9 +829,15 @@ pub async fn guard_status() -> crate::guard::Status {
 
 /// Change what happens to a marked file on delete.
 ///
-/// Written to the service's policy file rather than applied here: the service
-/// owns the file, watches it, and pushes the value into the kernel filter, so a
-/// change lands within a couple of seconds and survives a reboot.
+/// Written to the service's policy file rather than kept in this process: the
+/// service owns the file, watches it, and pushes the value into the kernel
+/// filter, so a change lands within a couple of seconds and survives a reboot.
+/// The same file is what the user-mode hold backend reads back, so both
+/// mechanisms take their orders from one place.
+///
+/// The disposition is then applied here as well. With no driver installed there
+/// is nothing else to do it, and the hold has to be taken or released by
+/// whichever process is running - which is this one.
 ///
 /// Turning protection **on** is gated; turning it **off** never is. The
 /// asymmetry is the same one as `clear_importance`: a lapsed subscriber must
@@ -827,7 +850,22 @@ pub async fn set_guard_disposition(disposition: crate::guard::Disposition) -> Re
         if !stands_down && !crate::license::entitlement().guard_allowed() {
             return Err("删除防护需要有效订阅".to_string());
         }
-        crate::guard::write(disposition).map_err(|e| format!("无法写入守护策略：{e}"))
+        crate::guard::write(disposition).map_err(|e| format!("无法写入守护策略：{e}"))?;
+
+        if stands_down {
+            // Every handle, not just the marked ones. Standing down has to be
+            // unconditional: the user asked for it, and leaving a file held
+            // because the mark store could not be read would be the guard
+            // refusing to let go.
+            crate::protection::release_all_holds();
+        } else {
+            // `Ask` and `Deny` both hold. The prompt is a driver capability -
+            // a held handle cannot ask anything, it only makes the delete fail -
+            // so with no driver the two behave the same, and the alternative
+            // would be an "ask me" setting that protects nothing at all.
+            crate::protection::sync_holds_from_marks();
+        }
+        Ok(())
     })
     .await
 }
