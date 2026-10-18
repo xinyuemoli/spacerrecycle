@@ -123,6 +123,5 @@ guest: it marks a file, launches the app, attempts a delete **from a separate
 process**, and then stands the guard down and attempts it again. A handle does not
 stop the process that owns it, so a same-process delete would prove nothing.
 
-`_checkall.ps1` at the repository root runs the Rust suite, the frontend
-harnesses, the shell extension build, the encoding check and the author-history
-leak check.
+`scripts/check-all.ps1` runs the Rust suite, the frontend harnesses, the shell
+extension build, the encoding check and the author-history leak check.
