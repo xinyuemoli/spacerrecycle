@@ -80,6 +80,24 @@ check("log file path shown", html.includes("audit.log"));
 check("large-file size shown in MB", html.includes('value="1"'), "1048576 bytes should render as 1 MB");
 check("expiry notice states no auto-delete", html.includes("\u7edd\u4e0d\u81ea\u52a8\u5220\u9664"));
 
+// ---- A disabled option explains itself ----
+//
+// No entitlement and no linked account in this fixture, so the OneDrive
+// quarantine option is unavailable. It used to render greyed out with no reason
+// at all: the explanation was conditioned on the option already being selected,
+// which is impossible for a control the user cannot select. The state that
+// exposed it was a non-subscriber staring at a dead radio button with nothing
+// telling them whether the problem was money or an account.
+
+check("the unavailable OneDrive option is disabled",
+  /<input[^>]*value="onedrive"[^>]*disabled/.test(html),
+  "the option must not look usable");
+check("the local option stays usable",
+  !/<input[^>]*value="local"[^>]*disabled/.test(html));
+check("and the reason is stated",
+  html.includes("OneDrive \u9694\u79bb\u9700\u8981\u6709\u6548\u8ba2\u9605"),
+  "without this the option is dead with no explanation");
+
 console.log("\nDONE");
 
 

@@ -928,6 +928,13 @@ function guardCard() {
     configured: false, unknown: true,
   };
 
+  // The guard is a paid feature, and the resolved flag is used rather than
+  // "is this user a subscriber" because a copy with nothing on sale - the
+  // GitHub build, or a Store build with no add-on published yet - must keep the
+  // feature open. Reading `subscriber` here would lock those copies out of a
+  // feature they can plainly see.
+  const guardAllowed = !!(state.entitlement && state.entitlement.guardAllowed);
+
   let status = "";
   if (!g.unknown) {
     status = !g.serviceInstalled
@@ -936,11 +943,19 @@ function guardCard() {
   }
   const health = g.unknown ? "" : (g.serviceRunning ? "ok" : "warn");
 
-  const option = (value, labelKey, hintKey) => {
+  // Two of the three dispositions turn the guard on and are therefore the paid
+  // part. The third stands it down, and standing down is never gated - refusing
+  // to let someone stop being protected would be a worse failure than letting
+  // them start without paying, and the backend has always allowed it.
+  //
+  // The input stays on one line deliberately: _test_guard.mjs matches the
+  // rendered markup as a substring, and reflowing the tag is how that contract
+  // breaks without any behaviour changing.
+  const option = (value, labelKey, hintKey, enabled) => {
     const on = g.disposition === value;
     return h`
       <label class="guardopt${on ? " on" : ""}">
-        <input type="radio" name="guard-dispo" value="${value}" data-act="guard" ${on ? "checked" : ""} />
+        <input type="radio" name="guard-dispo" value="${value}" data-act="guard" ${on ? "checked" : ""} ${enabled ? "" : "disabled"} />
         <span>
           <span class="setlabel">${T(labelKey)}</span>
           <span class="faint guardhint">${T(hintKey)}</span>
@@ -948,15 +963,23 @@ function guardCard() {
       </label>`;
   };
 
+  // Both lines, not one instead of the other. The subscription reason explains
+  // why the options are unavailable; "nothing is protected" is a safety
+  // statement that stays true either way, and suppressing it because the user
+  // has not paid would hide the more serious of the two facts.
+  const banner = h`
+      ${guardAllowed ? "" : h`<div class="guardstatus warn">${T("set.guard.needsSub")}</div>`}
+      ${health ? h`<div class="guardstatus ${health}">${status}</div>` : ""}`;
+
   return h`
     <h2 class="section">${T("set.guard")}</h2>
     <div class="card mb">
       <div class="faint" style="font-size:11px">${T("set.guardHint")}</div>
-      ${health ? h`<div class="guardstatus ${health}">${status}</div>` : ""}
+      ${banner}
       <div class="guardopts">
-        ${option("ask", "set.guard.ask", "set.guard.askHint")}
-        ${option("deny", "set.guard.deny", "set.guard.denyHint")}
-        ${option("allow", "set.guard.allow", "set.guard.allowHint")}
+        ${option("ask", "set.guard.ask", "set.guard.askHint", guardAllowed)}
+        ${option("deny", "set.guard.deny", "set.guard.denyHint", guardAllowed)}
+        ${option("allow", "set.guard.allow", "set.guard.allowHint", true)}
       </div>
       ${g.configured ? "" : h`<div class="faint mt" style="font-size:11px">${T("set.guard.default")}</div>`}
     </div>`;
@@ -1009,7 +1032,7 @@ function quarantineCard() {
         ${option("onedrive", "set.q.oneDrive", "set.q.oneDriveHint", cloudReady)}
       </div>
       <div class="mono faint mt" style="font-size:11px;word-break:break-all">${esc(c.quarantineDir || "")}</div>
-      ${target === "onedrive" && !cloudReady ? h`<div class="guardstatus warn">${why}</div>` : ""}
+      ${cloudReady ? "" : h`<div class="guardstatus warn">${why}</div>`}
     </div>`;
 }
 

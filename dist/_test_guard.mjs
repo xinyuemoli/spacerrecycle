@@ -139,12 +139,70 @@ check("the card renders its choices even without a status",
 check("but claims no health it cannot verify",
   !html.includes("\u5b88\u62a4\u670d\u52a1\u8fd0\u884c\u4e2d") && !html.includes("\u5df2\u5b89\u88c5\u4f46\u672a\u8fd0\u884c"));
 
+// ---- The guard is a paid feature, and the card has to say so ----
+//
+// The same shape as the OneDrive quarantine option: the paid choices are
+// disabled with the reason rather than hidden, and the free one stays open.
+// Pulling each input tag out and looking for the attribute is deliberate -
+// matching a fixed substring of the rendered markup only passes while nobody
+// reformats the template.
+
+function dispoTag(value) {
+  const m = html.match(new RegExp('<input[^>]*value="' + value + '"[^>]*>'));
+  return m ? m[0] : "";
+}
+
+const openTier = S.entitlement;
+S.entitlement = {
+  subscriber: false, source: "store",
+  cloudAllowed: false, importanceAllowed: false, guardAllowed: false,
+};
+S.guard = { serviceInstalled: false, serviceRunning: false, disposition: "ask", configured: true };
+await ui.render();
+html = doc();
+
+check("turning the guard on is disabled when it is gated",
+  dispoTag("ask").includes("disabled") && dispoTag("deny").includes("disabled"),
+  dispoTag("ask"));
+check("standing the guard down is never disabled",
+  dispoTag("allow") !== "" && !dispoTag("allow").includes("disabled"),
+  dispoTag("allow"));
+check("it names the subscription as the reason", html.includes("\u5220\u9664\u9632\u62a4\u9700\u8981\u6709\u6548\u8ba2\u9605"));
+check("the safety warning is not suppressed by the paid one",
+  html.includes("\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4"),
+  "hiding 'nothing is protected' because the user has not paid inverts the priorities");
+check("the free choice is still selectable", st.getState().tab === "settings");
+
+// ---- A copy with nothing on sale keeps the whole guard open ----
+//
+// subscriber=false with the feature allowed is the GitHub build, and it is the
+// trap the entitlement design exists to avoid: reading `subscriber` here would
+// disable the controls on a copy where there is nothing to buy, locking people
+// out of a feature they can see.
+
+S.entitlement = {
+  subscriber: false, source: "unpackaged",
+  cloudAllowed: true, importanceAllowed: true, guardAllowed: true,
+};
+await ui.render();
+html = doc();
+
+check("nothing on sale leaves the paid choices enabled",
+  !dispoTag("ask").includes("disabled") && !dispoTag("deny").includes("disabled"),
+  dispoTag("ask"));
+check("and does not claim a subscription is needed",
+  !html.includes("\u5220\u9664\u9632\u62a4\u9700\u8981\u6709\u6548\u8ba2\u9605"));
+check("and still reports the service honestly",
+  html.includes("\u5b88\u62a4\u670d\u52a1\u672a\u5b89\u88c5"));
+
+S.entitlement = openTier;
+
 // ---- Both languages have the strings ----
 
 for (const key of ["set.guard", "set.guardHint", "set.guard.ask", "set.guard.askHint",
                    "set.guard.deny", "set.guard.denyHint", "set.guard.allow", "set.guard.allowHint",
                    "set.guard.active", "set.guard.installedNotRunning", "set.guard.notInstalled",
-                   "set.guard.saved", "set.guard.default"]) {
+                   "set.guard.saved", "set.guard.default", "set.guard.needsSub"]) {
   const zh = i18n.t("zh", key);
   const en = i18n.t("en", key);
   check("string " + key, zh !== key && en !== key && zh !== en,
