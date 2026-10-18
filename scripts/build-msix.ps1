@@ -87,13 +87,27 @@ if (-not $SkipBuild) {
     Write-Host "==> cargo build --release" -ForegroundColor Cyan
     Push-Location $tauriDir
     try {
-        # The two IDs are compiled in with option_env!, so they have to be in the
-        # environment of the cargo process - not written to a file afterwards.
-        # They are not secrets: the device-code flow uses a public client, so the
-        # client ID is visible in every authorization request anyway, and the
-        # add-on ID is visible to anyone who reads the binary.
-        $env:SPACERECYCLE_ADDON_ID = $AddonStoreId
-        $env:SPACERECYCLE_GRAPH_CLIENT_ID = $GraphClientId
+        # Only exported when there is something to export.
+        #
+        # Setting the variable to an empty string is not the same as leaving it
+        # unset, and the difference is the whole compiled-in default:
+        # `option_env!` returns Some("") for an empty variable and None for an
+        # absent one, so exporting an empty value takes the Some branch and
+        # bypasses the product ID baked into config.rs. The build then ships with
+        # no add-on at all - which resolves to NotConfigured, which opens every
+        # paid feature for free. That is the exact failure the default exists to
+        # prevent, and it was reintroduced by writing the variable
+        # unconditionally.
+        if (-not [string]::IsNullOrWhiteSpace($AddonStoreId)) {
+            $env:SPACERECYCLE_ADDON_ID = $AddonStoreId
+        } else {
+            Remove-Item Env:\SPACERECYCLE_ADDON_ID -ErrorAction SilentlyContinue
+        }
+        if (-not [string]::IsNullOrWhiteSpace($GraphClientId)) {
+            $env:SPACERECYCLE_GRAPH_CLIENT_ID = $GraphClientId
+        } else {
+            Remove-Item Env:\SPACERECYCLE_GRAPH_CLIENT_ID -ErrorAction SilentlyContinue
+        }
 
         # cmd does the redirection, and that is the whole point.
         #
@@ -120,6 +134,21 @@ if (-not $SkipBuild) {
 }
 if (-not (Test-Path $exePath)) { throw "Missing release binary: $exePath (build it first, or drop -SkipBuild)" }
 
+# What the binary will actually use, which is the parameter when it was given
+# and the value compiled into config.rs otherwise.
+#
+# Read out of the source rather than duplicated here, so there is one place to
+# change the product ID. A duplicated default is a default that drifts, and the
+# failure mode of this particular drift is giving the paid tier away.
+$compiledAddonId = ''
+if (Test-Path (Join-Path $tauriDir 'src\config.rs')) {
+    $m = [regex]::Match(
+        (Get-Content (Join-Path $tauriDir 'src\config.rs') -Raw),
+        'DEFAULT_SUBSCRIPTION_ADDON_STORE_ID[\s\S]{0,400}?None\s*=>\s*"([^"]*)"')
+    if ($m.Success) { $compiledAddonId = $m.Groups[1].Value }
+}
+$effectiveAddonId = if ([string]::IsNullOrWhiteSpace($AddonStoreId)) { $compiledAddonId } else { $AddonStoreId }
+
 # A Store build with no add-on ID is not a build with the paid tier switched
 # off. It is a build with the paid tier switched ON: the entitlement resolves to
 # NotConfigured, which means "nothing is on sale here", and the app correctly
@@ -127,15 +156,18 @@ if (-not (Test-Path $exePath)) { throw "Missing release binary: $exePath (build 
 # to everyone - and the only sign is that nobody is ever asked to subscribe.
 # That is a distribution decision, so it is stated plainly rather than left to
 # be discovered after release.
-if ([string]::IsNullOrWhiteSpace($AddonStoreId) -and -not $SkipBuild) {
+if ([string]::IsNullOrWhiteSpace($effectiveAddonId)) {
     Write-Host ""
-    Write-Host "WARNING: no add-on Store ID was supplied." -ForegroundColor Yellow
-    Write-Host "  The package will be built, but the subscription gate will never" -ForegroundColor Yellow
-    Write-Host "  close: every paid feature is open to every user, for free." -ForegroundColor Yellow
-    Write-Host "  Pass -AddonStoreId <product id> once the add-on exists." -ForegroundColor Yellow
+    Write-Host "WARNING: this package has no subscription add-on ID." -ForegroundColor Yellow
+    Write-Host "  The subscription gate will never close: every paid feature is" -ForegroundColor Yellow
+    Write-Host "  open to every user, for free." -ForegroundColor Yellow
+    Write-Host "  Pass -AddonStoreId <product id>, or set the default in" -ForegroundColor Yellow
+    Write-Host "  src-tauri/src/config.rs (DEFAULT_SUBSCRIPTION_ADDON_STORE_ID)." -ForegroundColor Yellow
     Write-Host ""
+} else {
+    Write-Host "Add-on Store ID compiled in: $effectiveAddonId" -ForegroundColor DarkGray
 }
-if ([string]::IsNullOrWhiteSpace($GraphClientId) -and -not $SkipBuild) {
+if ([string]::IsNullOrWhiteSpace($GraphClientId)) {
     Write-Host "NOTE: no Azure client ID was supplied - OneDrive account linking will" -ForegroundColor Yellow
     Write-Host "      report itself as unconfigured and the sign-in button stays inert." -ForegroundColor Yellow
 }
