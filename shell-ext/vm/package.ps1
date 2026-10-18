@@ -1,9 +1,15 @@
 # Stages the shell extension where the guest VM can reach it.
 #
-# The VM's shared folder is the developer's Downloads directory -> guest "Downloads", and
-# it is configured read-only from the guest's side, so this is a one-way
-# host-to-guest channel. That is enough to deliver build output and scripts;
-# results have to come back another way (vmrun, or the caller reading stdout).
+# The VM's shared folder is the developer's Downloads directory, mapped to
+# "Downloads" in the guest, and it is configured read-only from the guest's
+# side, so this is a one-way host-to-guest channel. That is enough to deliver
+# build output and scripts; results have to come back another way (vmrun, or the
+# caller reading stdout).
+#
+# The destination is derived from $env:USERPROFILE rather than written out. The
+# literal path that used to be here named the developer's own Windows account,
+# which is a leak in a public repository, and it silently wrote nowhere on any
+# other machine.
 [CmdletBinding()]
 param(
     [string]$Dest = (Join-Path $env:USERPROFILE 'Downloads\spacerecycle-shell-test')

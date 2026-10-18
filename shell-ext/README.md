@@ -219,8 +219,8 @@ nothing.
 Note that the guest's console session had to be restarted for Explorer to
 re-read the handler list. Killing `explorer.exe` did **not** bring it back even
 with `AutoRestartShell=1`, which left the session with no shell; a reboot fixed
-it, and the auto-logon account returned it to the
-desktop unattended. Reboot, don't taskkill.
+it, and the auto-logon account returned it to the desktop unattended. Reboot,
+don't taskkill.
 
 # Icon overlays: what was measured, and why the obvious design cannot work
 

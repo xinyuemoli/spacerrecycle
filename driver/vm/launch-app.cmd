@@ -6,6 +6,11 @@ REM the auto-logon account here has no password, so an empty -gp gets dropped on
 REM the way through the command line and vmrun swallows the next argument
 REM instead. A scheduled task with /it runs in the interactive session when that
 REM user is logged on and stores no password, which sidesteps the whole problem.
+REM
+REM The account is taken from %USERNAME% rather than written out. A hardcoded
+REM name only works on the machine it was written on, and this file previously
+REM carried the developer's own Windows user name - which is both a leak and a
+REM script that silently targets a nonexistent account anywhere else.
 set OUT=C:\sr-test\launch.txt
 set APP=C:\sr-test\app\spacerrecycle.exe
 

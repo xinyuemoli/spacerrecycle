@@ -19,3 +19,35 @@ src-tauri/cancel_probe.txt
 
 # Cloudflare Wrangler local state (deployment cache, local bindings).
 .wrangler/
+
+# --- browser profiles ---------------------------------------------------------------
+# Chromium user-data directories. These are not clutter: a profile holds
+# Cookies, Login Data (saved passwords), Web Data and History. The copies that
+# appeared here were produced by the promo scripts driving a logged-in browser,
+# so they carried live sessions for the accounts being posted from. DPAPI
+# encrypts the secrets to the Windows account that wrote them, which is not a
+# reason to publish the files.
+user-data/
+**/user-data/
+*-user-data/
+**/*-user-data/
+**/Login Data
+**/Login Data For Account
+**/Secure Preferences
+**/Cookies-journal
+
+# --- local machine state ------------------------------------------------------------
+# ACL backups and reports produced while diagnosing this machine's permissions.
+# They name real paths and real security identifiers.
+acl-recovery/
+
+# Editor and agent scratch directories.
+.commandcode/
+
+# --- stray working files ------------------------------------------------------------
+# Ad-hoc scripts and probe output that live in the repository root while
+# debugging. Underscore-prefixed so they sort together and stand out.
+/_*.ps1
+/_*.txt
+/_*.png
+/_*.json

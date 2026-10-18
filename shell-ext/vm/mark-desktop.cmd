@@ -5,6 +5,10 @@ REM Run as a file: vmrun appends a stray whitespace argument to inline commands.
 REM
 REM The desktop is the only place a session-0 process can make a GUI change
 REM visible, because session 1's own Explorer paints it.
+REM
+REM %USERPROFILE% rather than a literal path: this harness used to carry the
+REM developer's own user name, which made it both a leak and a script that only
+REM ran on one machine.
 set MENU=C:\sr-test\bin\menutest.exe
 set D=%USERPROFILE%\Desktop
 set OUT=C:\sr-test\marks.txt
