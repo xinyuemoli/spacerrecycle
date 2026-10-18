@@ -51,3 +51,27 @@ acl-recovery/
 /_*.txt
 /_*.png
 /_*.json
+
+# --- material that must not be published --------------------------------------------
+# Promotion drafts and the browser automation that posts them, for the platform
+# that asked for them to be taken down. Both the files and their history were
+# removed; these rules are so that a later `git add -A` cannot bring them back.
+#
+# The automation is a separate matter from the drafts. Scripts that log into a
+# social platform and publish on the user's behalf are against that platform's
+# terms, and a public repository is the wrong place to keep them whatever one
+# thinks of the terms.
+promo/xiaohongshu.md
+promo/xiaohongshu_report.md
+promo/publish-notes.md
+promo_xiaohongshu.py
+promo/store/shotgen/batch_promo.js
+promo/store/shotgen/batch2_promo.js
+promo/store/shotgen/login_check.js
+promo/store/shotgen/open_visible.js
+promo/store/shotgen/retry_post.js
+promo/store/shotgen/search_debug.js
+promo/store/shotgen/test_search.js
+promo/store/shotgen/urgent_post.js
+promo/store/shotgen/xiaohongshu_check.js
+promo/store/shotgen/xiaohongshu_promotion.js
