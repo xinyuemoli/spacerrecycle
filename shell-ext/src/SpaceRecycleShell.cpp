@@ -76,7 +76,34 @@ const wchar_t* kVerbKey = L"Software\\Classes\\%s\\shell\\SpaceRecycle";
 IEnumExplorerCommand* CreateSubCommandEnumerator();
 
 HINSTANCE g_module = nullptr;
+/// Held by `IClassFactory::LockServer`.
 LONG g_locks = 0;
+/// Live objects, which is the count that actually matters.
+///
+/// `DllCanUnloadNow` used to consult `g_locks` alone, so with no lock held it
+/// reported "unloadable" while the shell still held command objects - which it
+/// does, because Explorer caches the root `IExplorerCommand` between menu
+/// invocations. The DLL was unloaded, the cached pointer then referred to code
+/// that was no longer mapped, and the next expand jumped into it.
+///
+/// That is a crash on the desktop context menu, reproducible every time, with
+/// the fault reported in KERNELBASE because the jump lands in freed memory
+/// rather than at a symbol. `menutest` never saw it: it loads the DLL and exits
+/// before anything asks whether it can be unloaded.
+LONG g_objects = 0;
+
+/// Bumped for the lifetime of every COM object this DLL creates.
+///
+/// A member rather than a hand-written pair of calls in each constructor and
+/// destructor, because the pair is the kind of thing that gets added to three
+/// classes out of four.
+class ObjectCounter {
+public:
+    ObjectCounter() { InterlockedIncrement(&g_objects); }
+    ~ObjectCounter() { InterlockedDecrement(&g_objects); }
+    ObjectCounter(const ObjectCounter&) = delete;
+    ObjectCounter& operator=(const ObjectCounter&) = delete;
+};
 
 // -------------------------------------------------------------------- levels
 
@@ -442,6 +469,22 @@ std::wstring IconPath(const wchar_t* file) {
     return dir;
 }
 
+/// The full path of this DLL.
+///
+/// The fallback icon source when an icon file is missing: a DLL carries icons in
+/// its resources and the shell will extract one, which is better than handing
+/// back nothing. `GetIcon` used to return S_FALSE with a null out parameter on
+/// that path, and a dump of an Explorer crash showed a null dereference inside
+/// a string comparison - so a real path is the safer answer.
+std::wstring ModuleImagePath() {
+    wchar_t buf[MAX_PATH * 2] = {0};
+    DWORD n = GetModuleFileNameW(g_module, buf, _countof(buf));
+    if (n == 0 || n >= _countof(buf)) {
+        return std::wstring();
+    }
+    return std::wstring(buf, n);
+}
+
 /// Collect the filesystem paths out of a shell item array.
 std::vector<std::wstring> PathsFrom(IShellItemArray* items) {
     std::vector<std::wstring> out;
@@ -504,15 +547,26 @@ public:
         }
         *ppszName = nullptr;
         const bool zh = IsChineseUi();
-        const wchar_t* text = nullptr;
+        const wchar_t* text = L"";
         if (m_kind == Kind::Root) {
             text = zh ? L"重要级别" : L"Importance";
         } else {
             const LevelDef* def = FindLevel(m_kind);
-            if (def == nullptr) {
-                return E_FAIL;
+            // A missing level definition used to return E_FAIL with the out
+            // parameter left null. That is arguably correct COM - a failed call
+            // should not be used - but the shell does use it: a dump of an
+            // Explorer crash showed a null dereference inside StrCmpICW, a
+            // string comparison, with this DLL loaded and none of its code on
+            // the stack. In other words the crash happened after one of these
+            // calls returned, on a string it handed back.
+            //
+            // So every path now yields a real string. A title of "" is a
+            // harmless menu entry; a null title is a crash in somebody else's
+            // process.
+            text = (def == nullptr) ? L"" : (zh ? def->zh : def->en);
+            if (text == nullptr) {
+                text = L"";
             }
-            text = zh ? def->zh : def->en;
         }
         return SHStrDupW(text, ppszName);
     }
@@ -530,6 +584,13 @@ public:
             return S_FALSE;
         }
         std::wstring path = IconPath(def->ico);
+        if (path.empty()) {
+            // Fall back to this DLL, which has icons in its resources, rather
+            // than returning S_FALSE with a null out parameter. A path is the
+            // one thing here the shell will happily compare, and a null one is
+            // the shape of the crash the dump showed.
+            path = ModuleImagePath();
+        }
         if (path.empty()) {
             return S_FALSE;
         }
@@ -549,9 +610,15 @@ public:
         }
         const LevelDef* def = FindLevel(m_kind);
         if (def == nullptr) {
-            return S_FALSE;
+            // A real string rather than S_FALSE, for the reason spelled out in
+            // GetTitle: the shell compares what comes back.
+            return SHStrDupW(L"", ppszInfotip);
         }
-        return SHStrDupW(zh ? def->tip_zh : def->tip_en, ppszInfotip);
+        const wchar_t* tip = zh ? def->tip_zh : def->tip_en;
+        if (tip == nullptr) {
+            tip = L"";
+        }
+        return SHStrDupW(tip, ppszInfotip);
     }
 
     STDMETHODIMP GetCanonicalName(GUID* pguidCommandName) override {
@@ -682,6 +749,7 @@ public:
 
 private:
     ~SpaceRecycleCommand() = default;
+    ObjectCounter m_counter;
     LONG m_ref;
     Kind m_kind;
 };
@@ -775,6 +843,7 @@ public:
 
 private:
     CommandEnumerator() : m_ref(1), m_index(0) {}
+    ObjectCounter m_counter;
     ~CommandEnumerator() {
         for (size_t i = 0; i < m_children.size(); ++i) {
             m_children[i]->Release();
@@ -902,6 +971,7 @@ private:
 class ShellFactory final : public IClassFactory {
 public:
     explicit ShellFactory(REFCLSID clsid) : m_ref(1), m_clsid(clsid) {}
+    ObjectCounter m_counter;
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (ppv == nullptr) {
@@ -1095,7 +1165,8 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
 }
 
 STDAPI DllCanUnloadNow() {
-    return g_locks == 0 ? S_OK : S_FALSE;
+    // Both, and the second one is the one that was missing.
+    return (g_locks == 0 && g_objects == 0) ? S_OK : S_FALSE;
 }
 
 /// Register per-user under HKCU.
