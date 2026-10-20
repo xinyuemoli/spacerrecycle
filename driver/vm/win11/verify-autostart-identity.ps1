@@ -58,7 +58,13 @@ function All-Text($w) {
 }
 
 function Click-Settings($w) {
-    foreach ($name in @('Settings', '设置')) {
+    # The nav label is localised, and a literal cannot be trusted here: Windows
+    # PowerShell reads a BOM-less UTF-8 script with the system ANSI code page, so
+    # a Chinese label written literally arrives mangled and matches nothing. Both
+    # spellings are therefore built from code points next to the plain English
+    # one, which is what an English-locale machine shows.
+    $settingsZh = -join (@(0x8BBE, 0x7F6E) | ForEach-Object { [char]$_ })
+    foreach ($name in @('Settings', $settingsZh)) {
         $el = $w.FindFirst([System.Windows.Automation.TreeScope]::Descendants,
             (New-Object System.Windows.Automation.PropertyCondition(
                 [System.Windows.Automation.AutomationElement]::NameProperty, $name)))
@@ -129,7 +135,7 @@ while ($waited -lt 60 -and -not $found) {
     Start-Sleep -Seconds 3
     $waited += 3
     $t = All-Text $w
-    $found = $t | Where-Object { $_ -match 'Checked via|Subscribed|Not subscribed|订阅|已订阅' }
+    $found = $t | Where-Object { $_ -match 'Checked via|Subscribed|Not subscribed' }
 }
 Say "  waited ${waited}s for the entitlement text"
 
@@ -142,7 +148,7 @@ foreach ($x in $t) { Say "    $x" }
 Say ""
 Say "== verdict =="
 $identity = $t | Where-Object { $_ -match 'Checked via' }
-$sub = $t | Where-Object { $_ -match 'Subscribed|Not subscribed|订阅|已订阅' }
+$sub = $t | Where-Object { $_ -match 'Subscribed|Not subscribed' }
 
 if ($t.Count -eq 0) {
     Say "  INCONCLUSIVE - the window exposed no text at all, so nothing was read."

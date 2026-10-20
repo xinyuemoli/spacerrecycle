@@ -155,7 +155,7 @@ if (-not $w) {
     Say "  waited ${waited}s for the entitlement line"
 
     $store = $text | Where-Object { $_ -match 'Checked via' }
-    $sub = $text | Where-Object { $_ -match 'Not subscribed|Subscribed|订阅' }
+    $sub = $text | Where-Object { $_ -match 'Not subscribed|Subscribed' }
     Say "  identity line: $(if ($store) { $store } else { '(none read)' })"
     Say "  subscription line: $(if ($sub) { $sub } else { '(none read)' })"
 
