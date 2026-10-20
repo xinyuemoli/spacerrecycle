@@ -75,3 +75,7 @@ promo/store/shotgen/test_search.js
 promo/store/shotgen/urgent_post.js
 promo/store/shotgen/xiaohongshu_check.js
 promo/store/shotgen/xiaohongshu_promotion.js
+
+# Crash dumps pulled back from the VM for analysis. Hundreds of megabytes
+# each, and they contain a full process memory image.
+/_dumps/
