@@ -223,6 +223,52 @@ std::wstring IndexDir() {
     return dir;
 }
 
+/// Converts a wide string to UTF-8, which is what the index is written in.
+///
+/// The first version wrote `c < 128 ? c : '?'`, which lost every non-ASCII
+/// character in a path. That is not a cosmetic loss: the application looks the
+/// path up exactly, so `论文-重要.docx` was indexed as `????-??.docx`, matched
+/// nothing, and was silently unprotected. Chinese, Japanese and any accented
+/// name landed in the same hole - which is most of what the person this was
+/// built for would mark.
+///
+/// The stream was never affected: it is attached to the file by handle rather
+/// than by name. So the mark was really there and only the index was wrong,
+/// which is the worse shape of the bug - the overlay appears and the protection
+/// does not.
+std::string ToUtf8(const std::wstring& wide) {
+    if (wide.empty()) {
+        return std::string();
+    }
+    int n = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(), nullptr, 0,
+                                nullptr, nullptr);
+    if (n <= 0) {
+        return std::string();
+    }
+    std::string out((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(), &out[0], n, nullptr,
+                        nullptr);
+    return out;
+}
+
+/// The inverse, for reading the index back.
+///
+/// Only used to avoid appending a duplicate, but it has to agree with the
+/// writer: getting it wrong would append a second entry for every non-ASCII path
+/// on every mark, and the file would grow without bound.
+std::wstring FromUtf8(const std::string& narrow) {
+    if (narrow.empty()) {
+        return std::wstring();
+    }
+    int n = MultiByteToWideChar(CP_UTF8, 0, narrow.c_str(), (int)narrow.size(), nullptr, 0);
+    if (n <= 0) {
+        return std::wstring();
+    }
+    std::wstring out((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, narrow.c_str(), (int)narrow.size(), &out[0], n);
+    return out;
+}
+
 /// Reads the index into a set of paths. Used to avoid appending a duplicate.
 bool ReadIndex(std::vector<std::wstring>& out) {
     std::wstring dir = IndexDir();
@@ -265,8 +311,11 @@ bool ReadIndex(std::vector<std::wstring>& out) {
         }
         size_t first = line.find_first_not_of(' ');
         if (first != std::string::npos && line[first] != '#') {
-            std::wstring wide(line.begin() + first, line.end());
-            out.push_back(wide);
+            // Through FromUtf8, not a byte-per-character copy: the line is UTF-8
+            // and a Chinese path is three bytes per character. A naive widening
+            // would produce a string that matches nothing, so every mark on a
+            // non-ASCII path would append a duplicate entry forever.
+            out.push_back(FromUtf8(line.substr(first)));
         }
         if (nl == text.size()) {
             break;
@@ -308,9 +357,7 @@ void IndexAdd(const wchar_t* path) {
         "# authoritative - a path only counts while its\n"
         "# SpaceRecycle.Importance stream says so.\n";
     for (const auto& p : paths) {
-        for (wchar_t c : p) {
-            body.push_back(c < 128 ? (char)c : '?');
-        }
+        body += ToUtf8(p);
         body.push_back('\n');
     }
 
