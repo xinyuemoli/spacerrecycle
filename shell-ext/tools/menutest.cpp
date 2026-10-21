@@ -462,8 +462,31 @@ static int RunOutParams(const wchar_t* dllPath) {
         hr = cmd->GetIcon(nullptr, &icon);
         ExpectWritten(L"GetIcon", L"ppszIcon", &icon, sizeof(icon));
         ExpectStringUnlessFailed(L"GetIcon", L"ppszIcon", hr, icon);
+
+        // And the call that actually faulted.
+        //
+        // shell32 builds the context menu by asking the verb for its icon and
+        // handing the answer to Shell_GetCachedImageIndexW, which hashes the
+        // module name. Passing null there is what killed Explorer - the dump
+        // showed Shell_GetCachedImageIndexW -> LookupBackIconIndex ->
+        // CIconCache::LookupBackIconIndex -> LowercaseHashItem -> StrCmpICW with
+        // a null first argument.
+        //
+        // Doing it here means the exact faulting call is exercised under the
+        // test rather than in somebody's shell.
         if (icon && icon != (LPWSTR)(ULONG_PTR)0xCCCCCCCC) {
+            const int cached = Shell_GetCachedImageIndexW(icon, 0, 0);
+            if (cached < 0) {
+                wprintf(L"  FAIL  Shell_GetCachedImageIndexW returned %d for \"%s\"\n",
+                        cached, icon);
+                ++g_outFailures;
+            } else {
+                wprintf(L"  ok    Shell_GetCachedImageIndexW    \"%s\" -> %d\n", icon, cached);
+            }
             CoTaskMemFree(icon);
+        } else if (SUCCEEDED(hr)) {
+            wprintf(L"  FAIL  Shell_GetCachedImageIndexW    not attempted: no icon path\n");
+            ++g_outFailures;
         }
 
         GUID clsid;
