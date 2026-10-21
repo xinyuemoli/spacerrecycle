@@ -576,23 +576,40 @@ public:
             return E_POINTER;
         }
         *ppszIcon = nullptr;
+
+        // The root used to answer S_FALSE here, on the reasoning that a parent
+        // entry needs no icon. That reasoning was wrong, and the stack of a real
+        // Explorer crash says so:
+        //
+        //   shell32!LowercaseHashItem
+        //   shell32!CIconCache::LookupBackIconIndex
+        //   shell32!LookupBackIconIndex
+        //   windows_storage!Shell_GetCachedImageIndexW   <- module name is NULL
+        //   shell32!CRegistryVerbsContextMenu::QueryContextMenu
+        //
+        // A verb registered with ExplorerCommandHandler and no Icon value makes
+        // the shell ask this method for the icon. S_FALSE with a null string
+        // means "no icon" by the letter of the documentation, but the menu code
+        // passes whatever came back straight into the icon cache, which hashes
+        // the module name - and hashing NULL faults.
+        //
+        // So the root gets the DLL as its icon source too. Every path returns a
+        // path.
+        std::wstring path;
         if (m_kind == Kind::Root) {
-            return S_FALSE;  // no icon on the parent is fine
-        }
-        const LevelDef* def = FindLevel(m_kind);
-        if (def == nullptr) {
-            return S_FALSE;
-        }
-        std::wstring path = IconPath(def->ico);
-        if (path.empty()) {
-            // Fall back to this DLL, which has icons in its resources, rather
-            // than returning S_FALSE with a null out parameter. A path is the
-            // one thing here the shell will happily compare, and a null one is
-            // the shape of the crash the dump showed.
             path = ModuleImagePath();
+        } else {
+            const LevelDef* def = FindLevel(m_kind);
+            if (def != nullptr) {
+                path = IconPath(def->ico);
+            }
+            if (path.empty()) {
+                // Fall back to this DLL, which has icons in its resources.
+                path = ModuleImagePath();
+            }
         }
         if (path.empty()) {
-            return S_FALSE;
+            return E_FAIL;
         }
         return SHStrDupW(path.c_str(), ppszIcon);
     }

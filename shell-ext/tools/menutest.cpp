@@ -375,6 +375,30 @@ static void ExpectWritten(const wchar_t* what, const wchar_t* which, const void*
     }
 }
 
+// Stricter than "was it written", and the check that would have caught the
+// Explorer crash.
+//
+// Writing `*ppsz = nullptr` satisfies the poisoned-buffer check, and then the
+// shell hands that null to the icon cache, which hashes it and faults. The
+// contract that matters is: if the call did not fail outright, the string is
+// real. S_FALSE counts as not-failing here, because the menu code reads it as
+// "no icon, carry on" and carries on into a lookup with a null name.
+static void ExpectStringUnlessFailed(const wchar_t* what, const wchar_t* which,
+                                     HRESULT hr, const wchar_t* str) {
+    if (FAILED(hr)) {
+        wprintf(L"  ok    %-22s %s absent, call failed (hr=0x%08lX)\n", what, which,
+                (unsigned long)hr);
+        return;
+    }
+    if (str == nullptr) {
+        wprintf(L"  FAIL  %-22s %s is NULL after a non-failing call (hr=0x%08lX)\n",
+                what, which, (unsigned long)hr);
+        ++g_outFailures;
+        return;
+    }
+    wprintf(L"  ok    %-22s %s = \"%s\"\n", what, which, str);
+}
+
 static int RunOutParams(const wchar_t* dllPath) {
     wprintf(L"=== out parameters are written on every path ===\n\n");
 
@@ -413,27 +437,31 @@ static int RunOutParams(const wchar_t* dllPath) {
         IExplorerCommand* cmd = targets[t].cmd;
         wprintf(L"-- %s --\n", targets[t].name);
 
+        // Each string-returning method is checked twice: written at all, and
+        // not null unless the call failed outright. The second check is the one
+        // the Explorer crash needed - GetIcon on the root answered S_FALSE with
+        // a null string, the shell handed that to the icon cache, and hashing a
+        // null module name faulted.
         LPWSTR title = (LPWSTR)(ULONG_PTR)0xCCCCCCCC;
         HRESULT hr = cmd->GetTitle(nullptr, &title);
         ExpectWritten(L"GetTitle", L"ppszName", &title, sizeof(title));
+        ExpectStringUnlessFailed(L"GetTitle", L"ppszName", hr, title);
         if (title && title != (LPWSTR)(ULONG_PTR)0xCCCCCCCC) {
-            if (FAILED(hr)) {
-                wprintf(L"        note: failed (hr=0x%08lX) but the buffer is set\n",
-                        (unsigned long)hr);
-            }
             CoTaskMemFree(title);
         }
 
         LPWSTR tip = (LPWSTR)(ULONG_PTR)0xCCCCCCCC;
-        cmd->GetToolTip(nullptr, &tip);
+        hr = cmd->GetToolTip(nullptr, &tip);
         ExpectWritten(L"GetToolTip", L"ppszInfotip", &tip, sizeof(tip));
+        ExpectStringUnlessFailed(L"GetToolTip", L"ppszInfotip", hr, tip);
         if (tip && tip != (LPWSTR)(ULONG_PTR)0xCCCCCCCC) {
             CoTaskMemFree(tip);
         }
 
         LPWSTR icon = (LPWSTR)(ULONG_PTR)0xCCCCCCCC;
-        cmd->GetIcon(nullptr, &icon);
+        hr = cmd->GetIcon(nullptr, &icon);
         ExpectWritten(L"GetIcon", L"ppszIcon", &icon, sizeof(icon));
+        ExpectStringUnlessFailed(L"GetIcon", L"ppszIcon", hr, icon);
         if (icon && icon != (LPWSTR)(ULONG_PTR)0xCCCCCCCC) {
             CoTaskMemFree(icon);
         }
