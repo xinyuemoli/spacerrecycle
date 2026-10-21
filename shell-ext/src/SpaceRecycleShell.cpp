@@ -625,15 +625,16 @@ public:
         if (pguidCommandName == nullptr) {
             return E_POINTER;
         }
-        if (m_kind == Kind::Root) {
-            *pguidCommandName = CLSID_SpaceRecycleShell;
-            return S_OK;
-        }
+        // Always a real GUID, including on the paths that used to fail with the
+        // out parameter untouched - see GetOverlayInfo for why that matters.
+        // The parent's CLSID is the right fallback: it identifies the command,
+        // and two subcommands sharing it is a cosmetic problem next to handing
+        // the shell uninitialised memory.
+        *pguidCommandName = CLSID_SpaceRecycleShell;
         const LevelDef* def = FindLevel(m_kind);
-        if (def == nullptr || def->canonical == nullptr) {
-            return E_FAIL;
+        if (def != nullptr && def->canonical != nullptr) {
+            *pguidCommandName = *def->canonical;
         }
-        *pguidCommandName = *def->canonical;
         return S_OK;
     }
 
@@ -937,6 +938,16 @@ public:
         if (cchMax <= 0) {
             return E_INVALIDARG;
         }
+        // Written on every path, including the failures.
+        //
+        // The caller's buffer arrives uninitialised, and a dump of an Explorer
+        // crash showed the shell hashing an overlay icon path afterwards -
+        // shell32!LowercaseHashItem calling StrCmpICW with a null string. Our
+        // code was not on the stack because it had already returned, which is
+        // exactly what a failure that leaves the out parameter untouched looks
+        // like. An empty string is a nonsense icon path; a null one is a crash.
+        pwszIconFile[0] = L'\0';
+
         std::wstring icon = IconPath(m_iconFile.c_str());
         if (icon.empty()) {
             return E_FAIL;

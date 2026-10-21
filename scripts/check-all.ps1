@@ -42,6 +42,20 @@ $out = cmd /c "build.cmd 2>&1"
 Pop-Location
 if ($LASTEXITCODE -eq 0) { Write-Output "  ok   SpaceRecycleShell.dll built" } else { Write-Output "  FAIL shell-ext"; $failed += "shell-ext" }
 
+# Every COM out parameter must be written even on the failure paths. Leaving one
+# uninitialised is what crashed Explorer: the shell hashed an untouched overlay
+# icon buffer and dereferenced null inside shell32.
+Push-Location shell-ext
+$outParams = cmd /c "bin\menutest.exe outparams 2>&1"
+Pop-Location
+if ($LASTEXITCODE -eq 0) {
+    Write-Output "  ok   every COM out parameter is written"
+} else {
+    Write-Output "  FAIL out parameters"
+    $outParams | Select-String "NOT written|FAIL:" | ForEach-Object { Write-Output "       $($_.Line.Trim())" }
+    $failed += "shell-ext-outparams"
+}
+
 Write-Output ""
 Write-Output "===== 4. encoding: no mojibake, no BOM ====="
 # The mojibake markers are built from code points rather than written literally.

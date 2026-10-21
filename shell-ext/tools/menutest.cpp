@@ -338,21 +338,209 @@ static int RunOverlay(int argc, wchar_t** argv, const wchar_t* dllPath) {
     return 0;
 }
 
+// ---------------------------------------------------------- out parameters
+//
+// Every COM method here writes into caller-owned memory. The shell allocates
+// that memory uninitialised and, on some paths, uses it whether or not the
+// method succeeded - which is how a crash in shell32's string hashing turned out
+// to be our bug rather than the shell's.
+//
+// So each out parameter is poisoned first and then checked for having been
+// written. The poison is deliberately a value none of these methods would
+// produce: 0xCC bytes, which for a GUID, an enum, an int or a pointer are all
+// recognisably wrong.
+
+static void Poison(void* p, size_t n) {
+    memset(p, 0xCC, n);
+}
+
+static bool WasWritten(const void* p, size_t n) {
+    const unsigned char* b = (const unsigned char*)p;
+    for (size_t i = 0; i < n; ++i) {
+        if (b[i] != 0xCC) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int g_outFailures = 0;
+
+static void ExpectWritten(const wchar_t* what, const wchar_t* which, const void* p, size_t n) {
+    if (WasWritten(p, n)) {
+        wprintf(L"  ok    %-22s %s written\n", what, which);
+    } else {
+        wprintf(L"  FAIL  %-22s %s NOT written (poison intact)\n", what, which);
+        ++g_outFailures;
+    }
+}
+
+static int RunOutParams(const wchar_t* dllPath) {
+    wprintf(L"=== out parameters are written on every path ===\n\n");
+
+    IExplorerCommand* root = nullptr;
+    bool direct = false;
+    if (FAILED(CreateObject(CLSID_SpaceRecycleShell, IID_IExplorerCommand, dllPath,
+                            (void**)&root, &direct, true)) ||
+        root == nullptr) {
+        wprintf(L"  could not create the root command\n");
+        return 1;
+    }
+
+    struct Target { const wchar_t* name; IExplorerCommand* cmd; };
+    Target targets[8];
+    int targetCount = 0;
+    targets[targetCount].name = L"root";
+    targets[targetCount].cmd = root;
+    ++targetCount;
+
+    IEnumExplorerCommand* enumerator = nullptr;
+    if (SUCCEEDED(root->EnumSubCommands(&enumerator)) && enumerator != nullptr) {
+        IExplorerCommand* children[8] = {0};
+        ULONG fetched = 0;
+        enumerator->Next(8, children, &fetched);
+        static const wchar_t* names[8] = {
+            L"important", L"disposable", L"clear", L"child4",
+            L"child5", L"child6", L"child7", L"child8"};
+        for (ULONG i = 0; i < fetched && targetCount < 8; ++i) {
+            targets[targetCount].name = names[i];
+            targets[targetCount].cmd = children[i];
+            ++targetCount;
+        }
+    }
+
+    for (int t = 0; t < targetCount; ++t) {
+        IExplorerCommand* cmd = targets[t].cmd;
+        wprintf(L"-- %s --\n", targets[t].name);
+
+        LPWSTR title = (LPWSTR)(ULONG_PTR)0xCCCCCCCC;
+        HRESULT hr = cmd->GetTitle(nullptr, &title);
+        ExpectWritten(L"GetTitle", L"ppszName", &title, sizeof(title));
+        if (title && title != (LPWSTR)(ULONG_PTR)0xCCCCCCCC) {
+            if (FAILED(hr)) {
+                wprintf(L"        note: failed (hr=0x%08lX) but the buffer is set\n",
+                        (unsigned long)hr);
+            }
+            CoTaskMemFree(title);
+        }
+
+        LPWSTR tip = (LPWSTR)(ULONG_PTR)0xCCCCCCCC;
+        cmd->GetToolTip(nullptr, &tip);
+        ExpectWritten(L"GetToolTip", L"ppszInfotip", &tip, sizeof(tip));
+        if (tip && tip != (LPWSTR)(ULONG_PTR)0xCCCCCCCC) {
+            CoTaskMemFree(tip);
+        }
+
+        LPWSTR icon = (LPWSTR)(ULONG_PTR)0xCCCCCCCC;
+        cmd->GetIcon(nullptr, &icon);
+        ExpectWritten(L"GetIcon", L"ppszIcon", &icon, sizeof(icon));
+        if (icon && icon != (LPWSTR)(ULONG_PTR)0xCCCCCCCC) {
+            CoTaskMemFree(icon);
+        }
+
+        GUID clsid;
+        Poison(&clsid, sizeof(clsid));
+        cmd->GetCanonicalName(&clsid);
+        ExpectWritten(L"GetCanonicalName", L"pguidCommandName", &clsid, sizeof(clsid));
+
+        EXPCMDFLAGS cmdFlags;
+        Poison(&cmdFlags, sizeof(cmdFlags));
+        cmd->GetFlags(&cmdFlags);
+        ExpectWritten(L"GetFlags", L"pFlags", &cmdFlags, sizeof(cmdFlags));
+
+        EXPCMDSTATE state;
+        Poison(&state, sizeof(state));
+        cmd->GetState(nullptr, FALSE, &state);
+        ExpectWritten(L"GetState", L"pCmdState", &state, sizeof(state));
+        wprintf(L"\n");
+    }
+
+    // The overlay handlers are the ones the dump implicated, so the icon buffer
+    // is checked byte-wise rather than through the pointer.
+    struct { const wchar_t* label; const CLSID* clsid; } overlays[] = {
+        {L"overlay important", &CLSID_OverlayImportant},
+        {L"overlay disposable", &CLSID_OverlayDisposable},
+    };
+    for (int i = 0; i < 2; ++i) {
+        IShellIconOverlayIdentifier* handler = nullptr;
+        bool usedDirect = false;
+        if (FAILED(CreateObject(*overlays[i].clsid, IID_IShellIconOverlayIdentifier, dllPath,
+                                (void**)&handler, &usedDirect, i == 0)) ||
+            handler == nullptr) {
+            wprintf(L"-- %s --\n  could not create\n\n", overlays[i].label);
+            continue;
+        }
+        wprintf(L"-- %s --\n", overlays[i].label);
+
+        wchar_t buf[MAX_PATH * 2];
+        Poison(buf, sizeof(buf));
+        int index;
+        Poison(&index, sizeof(index));
+        DWORD overlayFlags;
+        Poison(&overlayFlags, sizeof(overlayFlags));
+        HRESULT hr = handler->GetOverlayInfo(buf, _countof(buf), &index, &overlayFlags);
+        // The buffer is the one that mattered: the shell hashes it. Empty is
+        // acceptable, uninitialised is not.
+        if (buf[0] == (wchar_t)0xCCCC) {
+            wprintf(L"  FAIL  GetOverlayInfo        icon buffer NOT written\n");
+            ++g_outFailures;
+        } else {
+            wprintf(L"  ok    GetOverlayInfo        icon buffer written (%s)\n",
+                    buf[0] ? buf : L"(empty)");
+        }
+        wprintf(L"        hr=0x%08lX\n", (unsigned long)hr);
+        ExpectWritten(L"GetOverlayInfo", L"pIndex", &index, sizeof(index));
+        ExpectWritten(L"GetOverlayInfo", L"pdwFlags", &overlayFlags, sizeof(overlayFlags));
+
+        int priority;
+        Poison(&priority, sizeof(priority));
+        handler->GetPriority(&priority);
+        ExpectWritten(L"GetPriority", L"pPriority", &priority, sizeof(priority));
+        wprintf(L"\n");
+        handler->Release();
+    }
+
+    for (int t = 0; t < targetCount; ++t) {
+        targets[t].cmd->Release();
+    }
+    if (enumerator) {
+        enumerator->Release();
+    }
+
+    wprintf(L"%s: %d out parameter(s) left unwritten\n",
+            g_outFailures == 0 ? L"PASS" : L"FAIL", g_outFailures);
+    return g_outFailures == 0 ? 0 : 1;
+}
+
 int wmain(int argc, wchar_t** argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    if (argc < 3) {
+    if (argc < 2) {
         wprintf(L"usage:\n");
-        wprintf(L"  menutest list    <path>          enumerate the submenu and item states\n");
-        wprintf(L"  menutest set     <path> <index>  invoke one submenu entry\n");
-        wprintf(L"  menutest get     <path>          read the ADS directly\n");
-        wprintf(L"  menutest overlay <path> [<path>] ask each overlay handler about each path\n");
+        wprintf(L"  menutest list      <path>          enumerate the submenu and item states\n");
+        wprintf(L"  menutest set       <path> <index>  invoke one submenu entry\n");
+        wprintf(L"  menutest get       <path>          read the ADS directly\n");
+        wprintf(L"  menutest overlay   <path> [<path>] ask each overlay handler about each path\n");
+        wprintf(L"  menutest outparams                 check every out parameter is written\n");
         return 2;
     }
 
     const std::wstring cmd = argv[1];
-    const std::wstring path = argv[2];
+    const std::wstring path = (argc >= 3) ? argv[2] : L"";
     const std::wstring dll = SiblingDllPath();
+
+    // Checked before the path requirement, because it needs no path.
+    if (cmd == L"outparams") {
+        const int rc = RunOutParams(dll.c_str());
+        CoUninitialize();
+        return rc;
+    }
+
+    if (argc < 3) {
+        wprintf(L"a path is required for '%s'\n", cmd.c_str());
+        CoUninitialize();
+        return 2;
+    }
 
     int rc = 0;
     if (cmd == L"get") {
