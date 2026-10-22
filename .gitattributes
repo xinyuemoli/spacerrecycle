@@ -1,0 +1,27 @@
+# Normalise line endings in the repository, not on each checkout.
+#
+# The blobs have always been LF; editors and scripts on Windows kept rewriting
+# them to CRLF, which turns a one-line change into a 260-line diff and makes
+# review useless. Everything is stored LF and checked out LF.
+* text=auto eol=lf
+
+# PowerShell files are stored LF too. Windows PowerShell reads a BOM-less UTF-8
+# script using the system code page, so scripts that contain non-ASCII text carry
+# a BOM - that rule is about encoding, not line endings, and the two are separate.
+*.ps1 text eol=lf
+*.cmd text eol=lf
+*.bat text eol=lf
+
+# Binary formats: never touch these.
+*.png binary
+*.ico binary
+*.jpg binary
+*.zip binary
+*.msix binary
+*.pfx binary
+*.cer binary
+*.dll binary
+*.exe binary
+*.sys binary
+*.vmdk binary
+*.iso binary
