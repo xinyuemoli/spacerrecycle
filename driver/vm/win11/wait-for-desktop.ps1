@@ -8,7 +8,8 @@
 param(
   [string]$Vmx = "<vm-dir>\Windows 11 x64.vmx",
   [string]$User = "sruser",
-  [string]$Password = "<redacted-password>",
+  # From the environment: a password committed to a public repository is public.
+  [string]$Password = $env:SR_VM_PASSWORD,
   [int]$InstallTimeoutMin = 60,
   [int]$DesktopTimeoutMin = 15
 )

@@ -20,7 +20,8 @@
 param(
   [string]$Vmx = "<vm-dir>\Windows 11 x64.vmx",
   [string]$User = "sruser",
-  [string]$Password = "<redacted-password>",
+  # From the environment: a password committed to a public repository is public.
+  [string]$Password = $env:SR_VM_PASSWORD,
   [int]$SessionTimeoutSec = 420,
   [switch]$SkipReset
 )
@@ -58,7 +59,7 @@ set W=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon
 reg add "%W%" /v AutoAdminLogon /t REG_SZ /d 1 /f >nul 2>&1
 reg add "%W%" /v DefaultUserName /t REG_SZ /d sruser /f >nul 2>&1
 reg add "%W%" /v DefaultDomainName /t REG_SZ /d SRWIN11 /f >nul 2>&1
-reg add "%W%" /v DefaultPassword /t REG_SZ /d <redacted-password> /f >nul 2>&1
+reg add "%W%" /v DefaultPassword /t REG_SZ /d $Password /f >nul 2>&1
 reg add "%W%" /v AutoLogonCount /t REG_DWORD /d 999 /f >nul 2>&1
 echo armed
 '@

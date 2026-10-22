@@ -59,9 +59,41 @@ if (-not (Test-Path (Join-Path $Stage "sources\install.wim"))) {
 # registers it to run on every boot; without it in the media root that copy has
 # nothing to copy from, and the guest stops logging itself in after the first
 # reboot.
+#
+# The answer file carries a placeholder where the local account password goes,
+# because this repository is public and a password in it is a password everybody
+# has. The real value comes from the environment when the media is built and is
+# never written into the tracked file.
+$vmPassword = $env:SR_VM_PASSWORD
+if ([string]::IsNullOrEmpty($vmPassword)) {
+  throw "SR_VM_PASSWORD is not set. It is the password the unattended install gives the local account."
+}
+
 foreach ($f in @("autounattend.xml", "srsetup.cmd", "srarm.cmd")) {
-  Copy-Item (Join-Path $Unattend $f) (Join-Path $Stage $f) -Force
-  Write-Output "  placed $f in the media root"
+  $src = Join-Path $Unattend $f
+  $dst = Join-Path $Stage $f
+  $body = [IO.File]::ReadAllText($src, (New-Object Text.UTF8Encoding($false)))
+  if ($body.Contains('__VM_PASSWORD__')) {
+    # Plain string replace, not a regex: a password containing $ or a backtick
+    # would be a pattern to Regex.Replace and literal text to the person who
+    # chose it.
+    $body = $body.Replace('__VM_PASSWORD__', $vmPassword)
+    [IO.File]::WriteAllText($dst, $body, (New-Object Text.UTF8Encoding($false)))
+    Write-Output "  placed $f in the media root (password substituted)"
+  } else {
+    Copy-Item $src $dst -Force
+    Write-Output "  placed $f in the media root"
+  }
+}
+
+# Refuse to build media that still carries the placeholder: the install would
+# then either fail or set a literal __VM_PASSWORD__ as the account password.
+foreach ($f in @("autounattend.xml", "srsetup.cmd", "srarm.cmd")) {
+  $dst = Join-Path $Stage $f
+  if (-not (Test-Path $dst)) { continue }
+  if ([IO.File]::ReadAllText($dst).Contains('__VM_PASSWORD__')) {
+    throw "$f still contains __VM_PASSWORD__ after staging"
+  }
 }
 
 # --- 3. rebuild ---

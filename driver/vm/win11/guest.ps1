@@ -41,7 +41,10 @@ $ErrorActionPreference = 'Continue'
 $vmrun = 'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe'
 $vmx   = '<vm-dir>\Windows 11 x64.vmx'
 $user  = 'sruser'
-$pass  = '<redacted-password>'
+# Read from the environment. This repository is public, and a password in it
+# is a password everybody has.
+$pass  = $env:SR_VM_PASSWORD
+if (-not $pass) { throw 'SR_VM_PASSWORD is not set - see driver/vm/win11/README.md' }
 
 if (-not (Test-Path $vmrun)) { throw "vmrun not found at $vmrun" }
 if (-not (Test-Path $vmx))   { throw "vmx not found at $vmx" }

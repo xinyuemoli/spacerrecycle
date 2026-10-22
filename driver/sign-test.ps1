@@ -15,7 +15,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $subject = 'CN=SpaceRecycle Test Driver'
-$password = '<redacted-password>'
+# Local password for the throwaway test-signing PFX, not a credential for
+# anything real - but it protects a private key, so it does not belong in a
+# repository either. Set SR_SIGN_PFX_PASSWORD before running this.
+$password = $env:SR_SIGN_PFX_PASSWORD
+if (-not $password) { throw 'SR_SIGN_PFX_PASSWORD is not set' }
 
 $signtool = 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe'
 if (-not (Test-Path $signtool)) { throw "signtool not found: $signtool" }

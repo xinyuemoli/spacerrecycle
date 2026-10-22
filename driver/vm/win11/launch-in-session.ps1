@@ -21,7 +21,8 @@ param(
   [Parameter(Mandatory = $true)][string]$Command,
   [string]$User = "sruser",
   [string]$Domain = "SRWIN11",
-  [string]$Password = "<redacted-password>",
+  # From the environment: a password committed to a public repository is public.
+  [string]$Password = $env:SR_VM_PASSWORD,
   [int]$SessionId = 1
 )
 

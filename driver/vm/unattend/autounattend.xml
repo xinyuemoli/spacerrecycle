@@ -207,7 +207,7 @@
 
       <AutoLogon>
         <Password>
-          <Value><redacted-password></Value>
+          <Value>__VM_PASSWORD__</Value>
           <PlainText>true</PlainText>
         </Password>
         <Enabled>true</Enabled>
@@ -219,7 +219,7 @@
         <LocalAccounts>
           <LocalAccount wcm:action="add">
             <Password>
-              <Value><redacted-password></Value>
+              <Value>__VM_PASSWORD__</Value>
               <PlainText>true</PlainText>
             </Password>
             <Description>SpaceRecycle test account</Description>
