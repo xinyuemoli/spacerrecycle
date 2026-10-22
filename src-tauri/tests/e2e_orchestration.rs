@@ -168,7 +168,7 @@ fn large_file_pass_skips_protected_paths() {
         protected.push(format!("{}\\{}\\", home_display.trim_end_matches('\\'), name));
     }
     for f in &findings {
-        let p = f.path.to_string_lossy().to_lowercase().replace('/', "\\");
+        let p = f.path.to_lowercase().replace('/', "\\");
         for want in &protected {
             assert!(
                 !p.starts_with(want.as_str()),

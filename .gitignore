@@ -79,3 +79,7 @@ promo/store/shotgen/xiaohongshu_promotion.js
 # Crash dumps pulled back from the VM for analysis. Hundreds of megabytes
 # each, and they contain a full process memory image.
 /_dumps/
+
+# Test signing certificate, exported from the freshly built MSIX. Public key
+# only, but it changes with every build, so it is not worth versioning.
+driver/vm/win11/sr-signing.cer
