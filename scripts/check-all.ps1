@@ -324,7 +324,14 @@ if (-not $confVersion) {
 Write-Output ""
 if ($failed.Count -eq 0) {
     Write-Output "ALL GREEN"
+    # The exit code is the contract, not the last line of output. This script
+    # used to end at the Write-Output, so anything that ran it and looked at
+    # $LASTEXITCODE saw whatever the last native command in here happened to
+    # return - which made a clean run look like a failure, and would have made a
+    # failing run look like a pass just as easily.
+    exit 0
 } else {
     $list = [string]::Join(", ", $failed)
     Write-Output "FAILED: $list"
+    exit 1
 }
