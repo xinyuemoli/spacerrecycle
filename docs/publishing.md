@@ -107,13 +107,29 @@ winget install microsoft.winappcli --source winget
 打包（流程已固化在 `scripts/build-msix.ps1`）：
 
 ```powershell
-.\scripts\build-msix.ps1 -Version 1.0.0.0 `
+.\scripts\build-msix.ps1 `
     -PackageName     "<Package/Identity/Name>" `
     -Publisher       "<Package/Identity/Publisher>" `
     -PublisherDisplay "<Package/Properties/PublisherDisplayName>"
 ```
 
-产物：`src-tauri\target\msix\SpaceRecycle_1.0.0.0_x64.msix`（约 2.7 MB，已用开发证书签名）。
+**版本号不再从命令行传。** 它在 `src-tauri\tauri.conf.json` 里，`Cargo.toml` 必须一致，
+`build-msix.ps1` 读它并补上第四段（`1.0.6` → 包版本 `1.0.6.0`）。
+传一个和仓库不一致的 `-Version` 会直接报错。
+
+正式发版走发布脚本，它会 bump 版本、跑检查、构建、打标签：
+
+```powershell
+.\scripts\release.ps1 -SetVersion 1.0.7        # bump + 检查 + 构建 + 打 tag
+.\scripts\release.ps1 -SetVersion 1.0.7 -Push  # 连 tag 一起推
+```
+
+它在**工作区不干净时拒绝运行** —— 标签和产物对不上，比没有标签更糟。
+
+> **历史遗留**：1.0.0.0 ~ 1.0.5.0 这 6 个版本**无法补标签**。当时的版本号只是命令行参数，
+> 仓库里没有记录任何版本与提交的对应关系。只有 `v1.0.6` 是从实际构建它的那个提交上打的标签。
+
+产物：`src-tauri\target\msix\SpaceRecycle_<版本>_x64.msix`（约 2.9 MB，已用开发证书签名）。
 
 三个身份值取自 Partner Center 的 **Product identity**（产品标识）面板，**必须逐字符一致**（官方明确：值区分大小写，空格和标点都要对上），否则上传会被拒。
 
