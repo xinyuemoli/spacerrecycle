@@ -100,10 +100,21 @@ Write-Output "===== 5. leak check ====="
 # finds itself is worse than no check: it fails on a clean tree, and the fix
 # somebody reaches for is to stop running it.
 $needles = @(
-    [string][char]49 + [char]49 + [char]53 + [char]55 + [char]48,   # the old account number
-    [string][char]120 + [char]105 + [char]97 + [char]111 + [char]100 + [char]117 + [char]111 + [char]116 + [char]101 + [char]99 + [char]104,
-    [string][char]115 + [char]104 + [char]117 + [char]112 + [char]101 + [char]105
+    (-join @([char]49, [char]49, [char]53, [char]55, [char]48)),
+    (-join @([char]120, [char]105, [char]97, [char]111, [char]100, [char]117,
+              [char]111, [char]116, [char]101, [char]99, [char]104)),
+    (-join @([char]115, [char]104, [char]117, [char]112, [char]101, [char]105))
 )
+# -join over an explicit char array, not `[string][char]49 + [char]49 + ...`
+# with commas between. The old form was parsed as a single expression: the array
+# held one 24-character string, Join("|") left a trailing empty alternative in
+# the regex, and the pattern matched every commit in the repository. A check that
+# matches everything reports a stable number regardless of what the history
+# contains, which looks exactly like a working check until the pattern is read.
+if ($needles.Count -ne 3 -or ($needles | Where-Object { $_.Length -lt 5 }).Count -gt 0) {
+    Write-Output "  FAIL the needle list did not build correctly"
+    $failed += "leak-needles"
+}
 $needlePattern = [string]::Join("|", $needles)
 
 $leak = 0
@@ -123,9 +134,19 @@ $messageNeedles = @(
 )
 $messagePattern = [string]::Join("|", $messageNeedles)
 
+# Test-machine account names, which are not personal data.
+#
+# `C:\Users\sruser` appears in commit messages describing work done in the
+# verification VM. The pattern below catches any profile path, so without this
+# the check flags the test account as if it were somebody's real account - and
+# then the only commits it reports are the ones that mention the test harness,
+# which are the ones least worth looking at.
+$testAccounts = @('sruser', 'me', 'test', 'user', 'runner', 'Administrator')
+
 foreach ($c in (git rev-list HEAD 2>&1)) {
     $m = git log -1 --format='%B' $c 2>&1 | Out-String
-    $real = [regex]::Matches($m, 'C:\\Users\\([^\s\\<]*)') | Where-Object { $_.Groups[1].Value -ne '' }
+    $real = [regex]::Matches($m, 'C:\\Users\\([^\s\\<]*)') |
+        Where-Object { $_.Groups[1].Value -ne '' -and $testAccounts -notcontains $_.Groups[1].Value }
     if ($m -match $messagePattern -or $real.Count -gt 0) { $leak++ }
 }
 Write-Output "  commits with personal data in the message: $leak"
