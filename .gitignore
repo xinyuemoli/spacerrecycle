@@ -83,3 +83,10 @@ promo/store/shotgen/xiaohongshu_promotion.js
 # Test signing certificate, exported from the freshly built MSIX. Public key
 # only, but it changes with every build, so it is not worth versioning.
 driver/vm/win11/sr-signing.cer
+
+# Python bytecode from the throwaway analysis scripts.
+__pycache__/
+*.pyc
+
+# One-off analysis scripts, like _*.ps1: throwaway, not part of the product.
+scripts/_*.py

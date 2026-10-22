@@ -59,15 +59,28 @@ Step "preconditions"
 Push-Location $root
 try {
     # A release must be built from a commit that contains everything in the
-    # build. Anything uncommitted means the artifact cannot be reproduced from
-    # the tag.
-    $dirty = git status --porcelain
-    if ($dirty -and -not $DryRun) {
-        Write-Host "The working tree has uncommitted changes:" -ForegroundColor Red
-        $dirty | ForEach-Object { Write-Host "  $_" }
+    # build, so modifications to tracked files are fatal: the artifact could not
+    # be reproduced from the tag.
+    #
+    # Untracked files are only a warning. Build output, screenshots pulled out of
+    # a VM, and other artifacts live in the tree without being part of any
+    # commit, and refusing to release until they are deleted or stashed would
+    # make the release path something people work around.
+    $modified = git status --porcelain --untracked-files=no
+    if ($modified -and -not $DryRun) {
+        Write-Host "Tracked files have uncommitted changes:" -ForegroundColor Red
+        $modified | ForEach-Object { Write-Host "  $_" }
         Fail "commit or stash them first - a tag that does not match the build is worse than no tag"
     }
-    Write-Host "  tree is clean"
+
+    $untracked = git status --porcelain --untracked-files=normal |
+        Where-Object { $_ -match '^\?\?' }
+    if ($untracked) {
+        Write-Host "  note: $($untracked.Count) untracked path(s), not part of this release:" -ForegroundColor Yellow
+        $untracked | Select-Object -First 5 | ForEach-Object { Write-Host "    $_" }
+        if ($untracked.Count -gt 5) { Write-Host "    ... and $($untracked.Count - 5) more" }
+    }
+    Write-Host "  no tracked changes"
 
     $branch = (git rev-parse --abbrev-ref HEAD).Trim()
     Write-Host "  branch: $branch"
