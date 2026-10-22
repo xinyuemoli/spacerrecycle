@@ -193,7 +193,8 @@ try {
         # Newest first, directly under the header separator. An existing row for
         # this version is replaced rather than duplicated, so re-running a release
         # after a failed build does not leave two.
-        $lines = [System.Collections.Generic.List[string]]([IO.File]::ReadAllText($releasesPath) -split "`r?`n")
+        $lines = [System.Collections.Generic.List[string]](
+            [IO.File]::ReadAllText($releasesPath, (New-Object Text.UTF8Encoding($false))) -split "`r?`n")
         for ($i = $lines.Count - 1; $i -ge 0; $i--) {
             if ($lines[$i] -match "^\|\s*v$([regex]::Escape($current))\s*\|") { $lines.RemoveAt($i) }
         }
@@ -206,7 +207,17 @@ try {
         $lines.Insert($insertAt, $row)
         # Written without a BOM: this repository has been bitten twice.
         [IO.File]::WriteAllText($releasesPath, ($lines -join "`r`n"), (New-Object Text.UTF8Encoding($false)))
-        Write-Host "  RELEASES.md updated" -ForegroundColor Green
+
+        # Read it back and check that it round-tripped. `[IO.File]::ReadAllText`
+        # on Windows PowerShell 5.1 decodes using the system ANSI code page when no
+        # encoding is given, so a file of Chinese text read that way and written
+        # back is mojibake - and it looks fine in the terminal until somebody
+        # opens it elsewhere. Cheaper to verify than to notice later.
+        $check = [IO.File]::ReadAllText($releasesPath, (New-Object Text.UTF8Encoding($false)))
+        if ($check -match '\uFFFD' -or $check -ne ($lines -join "`r`n")) {
+            Fail "RELEASES.md did not survive the write unchanged - check its encoding"
+        }
+        Write-Host "  RELEASES.md updated (round-trip verified)" -ForegroundColor Green
 
         git add $releasesPath
         git commit --quiet -m "chore(release): record $current"
