@@ -170,6 +170,49 @@ try {
         Write-Host "  $artifact" -ForegroundColor Green
     }
 
+    # ------------------------------------------------------------------ record
+
+    # The hashes go into RELEASES.md before the tag, so the tag's commit contains
+    # the record of what it released. The exe is inside the package; the shell
+    # extension is deployed separately, so both get their own hash.
+    Step "record"
+    if ($DryRun) {
+        Write-Host "  (dry run: would add a RELEASES.md row for $current)"
+    } else {
+        $exePath2 = Join-Path $tauriDir "target\release\spacerrecycle.exe"
+        $dllPath  = Join-Path $root "shell-ext\bin\SpaceRecycleShell.dll"
+        $exeHash = if (Test-Path $exePath2) { (Get-FileHash $exePath2 -Algorithm SHA256).Hash } else { "n/a" }
+        $dllHash = if (Test-Path $dllPath)  { (Get-FileHash $dllPath  -Algorithm SHA256).Hash } else { "n/a" }
+        Write-Host "  exe $exeHash"
+        Write-Host "  dll $dllHash"
+
+        $releasesPath = Join-Path $root "RELEASES.md"
+        $headShort = (git rev-parse --short HEAD).Trim()
+        $row = "| v$current | ``$headShort`` | ``$exeHash`` | ``$dllHash`` | 由 scripts\release.ps1 记录 |"
+
+        # Newest first, directly under the header separator. An existing row for
+        # this version is replaced rather than duplicated, so re-running a release
+        # after a failed build does not leave two.
+        $lines = [System.Collections.Generic.List[string]]([IO.File]::ReadAllText($releasesPath) -split "`r?`n")
+        for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+            if ($lines[$i] -match "^\|\s*v$([regex]::Escape($current))\s*\|") { $lines.RemoveAt($i) }
+        }
+        # Located after the removal, so the index refers to the list being edited.
+        $insertAt = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\|\s*---') { $insertAt = $i + 1; break }
+        }
+        if ($insertAt -lt 0) { Fail "could not find the table in RELEASES.md" }
+        $lines.Insert($insertAt, $row)
+        # Written without a BOM: this repository has been bitten twice.
+        [IO.File]::WriteAllText($releasesPath, ($lines -join "`r`n"), (New-Object Text.UTF8Encoding($false)))
+        Write-Host "  RELEASES.md updated" -ForegroundColor Green
+
+        git add $releasesPath
+        git commit --quiet -m "chore(release): record $current"
+        Write-Host "  committed"
+    }
+
     # ---------------------------------------------------------------------- tag
 
     if (-not $NoTag) {
