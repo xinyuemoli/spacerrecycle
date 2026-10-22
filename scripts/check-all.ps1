@@ -38,9 +38,21 @@ if ($ff -gt 0) { $failed += "frontend" }
 Write-Output ""
 Write-Output "===== 3. shell extension ====="
 Push-Location shell-ext
-$out = cmd /c "build.cmd 2>&1"
-Pop-Location
-if ($LASTEXITCODE -eq 0) { Write-Output "  ok   SpaceRecycleShell.dll built" } else { Write-Output "  FAIL shell-ext"; $failed += "shell-ext" }
+try {
+    $out = cmd /c "build.cmd 2>&1"
+    $buildCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($buildCode -eq 0) {
+    Write-Output "  ok   SpaceRecycleShell.dll built"
+} else {
+    # Say why. A check that reports FAIL without its output costs the next person
+    # the same investigation this just cost.
+    Write-Output "  FAIL shell-ext (exit $buildCode)"
+    $out | Select-Object -Last 12 | ForEach-Object { Write-Output "       $_" }
+    $failed += "shell-ext"
+}
 
 # The handler hands the shell a path from GetOverlayInfo. Nothing checks that the
 # path exists, and the shell draws no overlay when it does not - which is exactly
@@ -186,8 +198,8 @@ $testAccounts = @('sruser', 'me', 'test', 'user', 'runner', 'Administrator')
 
 foreach ($c in (git rev-list HEAD 2>&1)) {
     $m = git log -1 --format='%B' $c 2>&1 | Out-String
-    $real = [regex]::Matches($m, 'C:\\Users\\([^\s\\<]*)') |
-        Where-Object { $_.Groups[1].Value -ne '' -and $testAccounts -notcontains $_.Groups[1].Value }
+    $real = [regex]::Matches($m, 'C:\\Users\\([A-Za-z0-9._-]+)') |
+        Where-Object { $testAccounts -notcontains $_.Groups[1].Value }
     if ($m -match $messagePattern -or $real.Count -gt 0) { $leak++ }
 }
 Write-Output "  commits with personal data in the message: $leak"
