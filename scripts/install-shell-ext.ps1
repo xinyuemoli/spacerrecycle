@@ -16,6 +16,13 @@
 #   scripts\install-shell-ext.ps1 -RestartExplorer
 
 param(
+    # Expected SHA256 of the DLL. When given, the install refuses unless the file
+    # matches. That is what turns "the test machine is running release 1.0.6"
+    # from a recollection into a check: the hash is recorded in RELEASES.md, and
+    # the build is reproducible (/Brepro), so the same source produces the same
+    # bytes and the hash identifies the content.
+    [string]$ExpectHash,
+
     [switch]$RestartExplorer,
     [switch]$Quiet
 )
@@ -62,6 +69,21 @@ foreach ($name in $needed) {
 $dllHash = (Get-FileHash $dll -Algorithm SHA256).Hash
 Say "  ok    SpaceRecycleShell.dll ($((Get-Item $dll).Length) bytes)"
 Say "        sha256 $dllHash"
+
+# The hash is the identity of the build. Two builds of the same source produce the
+# same bytes now that /Brepro is on, so a mismatch means the file is not the build
+# that was expected - a stale one, a differently built one, or a different source.
+if ($ExpectHash) {
+    if ($dllHash -ne $ExpectHash.ToUpperInvariant()) {
+        Write-Output ""
+        Write-Output "refusing to install: the DLL does not match the expected build."
+        Write-Output "  expected $($ExpectHash.ToUpperInvariant())"
+        Write-Output "  actual   $dllHash"
+        Write-Output "See RELEASES.md for the hash each version ships."
+        exit 1
+    }
+    Say "  ok    hash matches the expected build"
+}
 
 if ($failures.Count -gt 0) {
     Write-Output ""
