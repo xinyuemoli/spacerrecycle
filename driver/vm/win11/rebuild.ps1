@@ -14,12 +14,17 @@
 # successful logon, so they are now re-written on every boot.
 
 param(
-  [string]$Dir = "<vm-dir>",
-  [string]$Vmx = "<vm-dir>\Windows 11 x64.vmx",
+  [string]$Dir = "",
+  [string]$Vmx = $env:SR_VMX,
   [string]$Vdisk = "C:\Program Files (x86)\VMware\VMware Workstation\vmware-vdiskmanager.exe",
   [string]$Vmrun = "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe",
   [switch]$SkipIso
 )
+
+if ([string]::IsNullOrEmpty($Vmx)) {
+    throw 'SR_VMX is not set - path to the test VM''s .vmx file'
+}
+if ([string]::IsNullOrEmpty($Dir)) { $Dir = Split-Path -Parent $Vmx }
 
 # Not Stop: vmware-vdiskmanager prints an SSL config warning on stderr that is
 # entirely harmless, and treating stderr as fatal aborts the rebuild halfway
@@ -48,7 +53,7 @@ Write-Output "=== creating a new 70 GB disk ==="
 # --- 3. refresh the install media ---
 if (-not $SkipIso) {
   Write-Output "=== rebuilding the no-prompt ISO with the current answer files ==="
-  & "<repo>\driver\vm\win11\build-noprompt-iso.ps1" 2>&1 |
+  & "$PSScriptRoot\build-noprompt-iso.ps1" 2>&1 |
     Where-Object { $_ -match "placed|building|done|\.iso" }
 }
 

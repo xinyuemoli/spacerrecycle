@@ -1,7 +1,7 @@
 # One place that runs everything, so "is it all green" has an answer that is not
 # assembled by hand from several outputs.
 $ErrorActionPreference = 'Continue'
-$root = '<repo>'
+$root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $failed = @()
 

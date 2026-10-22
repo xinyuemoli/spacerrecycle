@@ -25,11 +25,20 @@
 # removable media for autounattend.xml, and the install media is one.
 
 param(
-  [string]$Iso = "<iso-dir>\Win11_24H2_Enterprise_Eval_x64.iso",
-  [string]$Stage = "<iso-dir>\win11-media",
-  [string]$Output = "<iso-dir>\Win11_noprompt.iso",
-  [string]$Unattend = "<repo>\driver\vm\unattend"
+  [string]$Iso = $env:SR_ISO,
+  [string]$Stage = $env:SR_ISO_STAGE,
+  [string]$Output = $env:SR_ISO_OUT,
+  [string]$Unattend = "$PSScriptRoot\..\unattend"
 )
+if ([string]::IsNullOrEmpty($Iso)) {
+    throw 'SR_ISO is not set - path to the Windows install ISO to rebuild'
+}
+if ([string]::IsNullOrEmpty($Stage)) {
+    throw 'SR_ISO_STAGE is not set - working directory for the rebuilt media'
+}
+if ([string]::IsNullOrEmpty($Output)) {
+    throw 'SR_ISO_OUT is not set - where to write the rebuilt ISO'
+}
 
 # Not Stop: oscdimg reports its progress on stderr, and treating that as fatal
 # aborts the build while the image is being written.

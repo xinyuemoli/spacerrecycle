@@ -39,7 +39,8 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $vmrun = 'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe'
-$vmx   = '<vm-dir>\Windows 11 x64.vmx'
+$vmx   = $env:SR_VMX
+if ([string]::IsNullOrEmpty($vmx)) { throw 'SR_VMX is not set - path to the test VM''s .vmx file' }
 $user  = 'sruser'
 # Read from the environment. This repository is public, and a password in it
 # is a password everybody has.

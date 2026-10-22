@@ -6,7 +6,7 @@
 # screen, which looks healthy to every check except the one that counts.
 
 param(
-  [string]$Vmx = "<vm-dir>\Windows 11 x64.vmx",
+  [string]$Vmx = $env:SR_VMX,
   [string]$User = "sruser",
   # From the environment: a password committed to a public repository is public.
   [string]$Password = $env:SR_VM_PASSWORD,
@@ -14,8 +14,12 @@ param(
   [int]$DesktopTimeoutMin = 15
 )
 
+if ([string]::IsNullOrEmpty($Vmx)) {
+    throw 'SR_VMX is not set - path to the test VM''s .vmx file'
+}
+
 $vmrun = "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
-$work = "<repo>\_vmwork"
+$work = "$PSScriptRoot\_vmwork"
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 
 function Guest([string[]]$Args) { & $vmrun -T ws -gu $User -gp $Password @Args 2>&1 }
@@ -28,7 +32,7 @@ while ((Get-Date) -lt $deadline) {
   $out = Guest @("fileExistsInGuest", $Vmx, "C:\Windows\System32\kernel32.dll")
   if ($out -match "file exists") { $tools = $true; break }
   if (((Get-Date) - $lastReport).TotalMinutes -ge 5) {
-    $gb = [math]::Round((Get-Item "<vm-dir>\Windows 11 x64.vmdk").Length / 1GB, 2)
+    $gb = [math]::Round((Get-Item ($Vmx -replace '\.vmx$', '.vmdk')).Length / 1GB, 2)
     Write-Output "  ...still installing, disk $gb GB"
     $lastReport = Get-Date
   }

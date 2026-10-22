@@ -18,13 +18,17 @@
 #   from the same scheduled task mechanism.
 
 param(
-  [string]$Vmx = "<vm-dir>\Windows 11 x64.vmx",
+  [string]$Vmx = $env:SR_VMX,
   [string]$User = "sruser",
   # From the environment: a password committed to a public repository is public.
   [string]$Password = $env:SR_VM_PASSWORD,
   [int]$SessionTimeoutSec = 420,
   [switch]$SkipReset
 )
+
+if ([string]::IsNullOrEmpty($Vmx)) {
+    throw 'SR_VMX is not set - path to the test VM''s .vmx file'
+}
 
 $ErrorActionPreference = "Stop"
 $vmrun = "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
@@ -47,7 +51,7 @@ function Wait-Tools {
   return $false
 }
 
-$work = "<repo>\_vmwork"
+$work = "$PSScriptRoot\_vmwork"
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 
 # --- 1. re-arm auto-logon ---
@@ -101,7 +105,7 @@ Write-Output "  session is up"
 
 # --- 3. launch the app on that desktop ---
 Write-Output "=== launching the app ==="
-Push "<repo>\driver\vm\win11\launch-app.cmd" "C:\sr-test\vm\launch-app.cmd"
+Push "$PSScriptRoot\launch-app.cmd" "C:\sr-test\vm\launch-app.cmd"
 RunIn "C:\sr-test\vm\launch-app.cmd"
 Start-Sleep -Seconds 45
 
@@ -120,7 +124,7 @@ Write-Output "  app is running"
 # --- 4. read the settings tab back ---
 Write-Output "=== reading the settings tab ==="
 foreach ($f in @("read-ui.ps1", "readui-task.cmd", "runui.cmd")) {
-  Push "<repo>\driver\vm\win11\$f" "C:\sr-test\vm\$f"
+  Push "$PSScriptRoot\$f" "C:\sr-test\vm\$f"
 }
 RunIn "C:\sr-test\vm\runui.cmd"
 Fetch "C:\sr-test\vm\runui.txt" "$work\runui.txt"

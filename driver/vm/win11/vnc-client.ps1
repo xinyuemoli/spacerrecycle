@@ -15,7 +15,7 @@ param(
   [int]$Port = 5901,
   [string]$Action = "dump",          # dump | key | shot
   [string]$Text = "",
-  [string]$OutFile = "<repo>\_vnc.png",
+  [string]$OutFile = "$PSScriptRoot\_vnc.png",
   [int]$TimeoutMs = 8000
 )
 
