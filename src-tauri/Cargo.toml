@@ -1,6 +1,6 @@
 [package]
 name = "spacerrecycle"
-version = "1.0.6"
+version = "1.0.7"
 description = "Windows disk space reclamation tool"
 edition = "2021"
 rust-version = "1.90"
