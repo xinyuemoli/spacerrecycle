@@ -2954,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "spacerrecycle"
-version = "0.1.0"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
