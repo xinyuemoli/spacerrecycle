@@ -42,6 +42,23 @@ $out = cmd /c "build.cmd 2>&1"
 Pop-Location
 if ($LASTEXITCODE -eq 0) { Write-Output "  ok   SpaceRecycleShell.dll built" } else { Write-Output "  FAIL shell-ext"; $failed += "shell-ext" }
 
+# The handler hands the shell a path from GetOverlayInfo. Nothing checks that the
+# path exists, and the shell draws no overlay when it does not - which is exactly
+# what happened when only the DLL was deployed and the .ico files were left
+# behind. The files are part of the extension, so they are checked like it.
+$iconsOk = $true
+foreach ($name in @('important.ico', 'disposable.ico', 'clear.ico')) {
+    $p = Join-Path 'shell-ext\bin\icons' $name
+    if (-not (Test-Path $p)) {
+        Write-Output "  FAIL icon missing: $name"
+        $iconsOk = $false
+    } elseif ((Get-Item $p).Length -lt 1000) {
+        Write-Output "  FAIL icon too small: $name ($((Get-Item $p).Length) bytes)"
+        $iconsOk = $false
+    }
+}
+if ($iconsOk) { Write-Output "  ok   all three overlay icons are present" } else { $failed += "shell-ext-icons" }
+
 # Every COM out parameter must be written even on the failure paths. Leaving one
 # uninitialised is what crashed Explorer: the shell hashed an untouched overlay
 # icon buffer and dereferenced null inside shell32.
@@ -52,7 +69,7 @@ if ($LASTEXITCODE -eq 0) {
     Write-Output "  ok   every COM out parameter is written"
 } else {
     Write-Output "  FAIL out parameters"
-    $outParams | Select-String "NOT written|FAIL:" | ForEach-Object { Write-Output "       $($_.Line.Trim())" }
+    $outParams | Select-String "NOT written|FAIL" | ForEach-Object { Write-Output "       $($_.Line.Trim())" }
     $failed += "shell-ext-outparams"
 }
 
@@ -90,12 +107,28 @@ $needles = @(
 $needlePattern = [string]::Join("|", $needles)
 
 $leak = 0
+# Two needle sets, because the two places mean different things.
+#
+# In a commit message, a personal identifier is a leak and the name of a purged
+# promotion channel is not: the commit that removes Xiaohongshu material has to
+# say what it is removing. Flagging that made this check fail on the very commit
+# that cleaned the repo up, and the natural response to a check that fails on
+# good work is to stop running it.
+#
+# In file contents, any trace of the purged material counts - that is how a
+# leftover script gets caught.
+$messageNeedles = @(
+    $needles[0],   # the old account number
+    $needles[2]    # the personal handle fragment
+)
+$messagePattern = [string]::Join("|", $messageNeedles)
+
 foreach ($c in (git rev-list HEAD 2>&1)) {
     $m = git log -1 --format='%B' $c 2>&1 | Out-String
     $real = [regex]::Matches($m, 'C:\\Users\\([^\s\\<]*)') | Where-Object { $_.Groups[1].Value -ne '' }
-    if ($m -match $needlePattern -or $real.Count -gt 0) { $leak++ }
+    if ($m -match $messagePattern -or $real.Count -gt 0) { $leak++ }
 }
-Write-Output "  commits with leaks in the message: $leak"
+Write-Output "  commits with personal data in the message: $leak"
 
 # Counted by file, not by matching line. The two agreed while every leak was a
 # single line, which is exactly the kind of agreement that stops holding without

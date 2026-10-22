@@ -153,10 +153,30 @@ fn large_file_pass_skips_protected_paths() {
         cancel.request_cancel();
     });
     let findings = scanner::largefile::scan_drive(&ctx, &home, &cfg);
+
+    // Compared as prefixes under the home directory, not as substrings.
+    //
+    // A substring test on "\desktop\" matches any folder called Desktop anywhere
+    // in the tree - and did: a cargo registry crate carries WinRT sources under
+    // `Windows\UI\Composition\Desktop\`, which made this test fail on a machine
+    // where nothing had actually leaked. The product protects the profile's own
+    // folders by joining them to the home directory, so the test checks exactly
+    // those.
+    let home_display = home.to_string_lossy().to_lowercase().replace('/', "\\");
+    let mut protected: Vec<String> = Vec::new();
+    for name in ["desktop", "documents"] {
+        protected.push(format!("{}\\{}\\", home_display.trim_end_matches('\\'), name));
+    }
     for f in &findings {
-        let p = f.path.to_lowercase();
-        assert!(!p.contains("\\documents\\"), "protected path leaked: {}", f.path);
-        assert!(!p.contains("\\desktop\\"), "protected path leaked: {}", f.path);
+        let p = f.path.to_string_lossy().to_lowercase().replace('/', "\\");
+        for want in &protected {
+            assert!(
+                !p.starts_with(want.as_str()),
+                "protected path leaked: {} (under {})",
+                f.path,
+                want
+            );
+        }
     }
     println!("profile-root pass surfaced {} large files, none protected", findings.len());
 }
