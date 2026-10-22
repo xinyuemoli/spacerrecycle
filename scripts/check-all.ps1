@@ -91,6 +91,47 @@ $bad = Get-ChildItem -Recurse -File -Include *.rs,*.js,*.mjs,*.json,*.md,*.html,
 if ($bad) { Write-Output "  FAIL mojibake in $($bad.Count) places"; $bad | Select-Object -First 5 | ForEach-Object { "         $($_.Path):$($_.LineNumber)" }; $failed += "encoding" }
 else { Write-Output "  ok   no mojibake" }
 
+# A byte order mark, which the heading of this section used to promise was
+# checked but was not.
+#
+# A BOM is not whitespace to a JSON parser: Tauri's build script fails with
+# "expected value at line 1 column 1" and says nothing about the BOM, and the
+# build simply stops. PowerShell 5.1's `Set-Content -Encoding UTF8` writes one,
+# so any script that rewrites a JSON file reintroduces the problem - which is
+# exactly how tauri.conf.json broke during a release.
+#
+# JSON and TOML fail hard on it. Rust and JavaScript accept it, so those are
+# reported without failing the run.
+$strictBom = @('*.json', '*.toml')
+$bomStrict = @()
+$bomLoose = @()
+$candidates = Get-ChildItem -Recurse -File -Include *.json,*.toml,*.rs,*.js,*.mjs,*.cpp,*.h,*.md,*.ps1 |
+    Where-Object { $_.FullName -notmatch '\\target\\|\\node_modules\\|\\.git\\|gen\\schemas|\\bin\\|\\promo\\store\\edgeprofile|\\acl-recovery\\' }
+foreach ($f in $candidates) {
+    try {
+        $fs = [IO.File]::OpenRead($f.FullName)
+        $head = New-Object byte[] 3
+        $n = $fs.Read($head, 0, 3)
+        $fs.Close()
+    } catch { continue }
+    if ($n -lt 3) { continue }
+    if ($head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) {
+        $isStrict = $false
+        foreach ($pat in $strictBom) { if ($f.Name -like $pat) { $isStrict = $true } }
+        if ($isStrict) { $bomStrict += $f.FullName } else { $bomLoose += $f.FullName }
+    }
+}
+if ($bomStrict.Count -gt 0) {
+    Write-Output "  FAIL BOM in $($bomStrict.Count) JSON/TOML file(s) - these fail to parse:"
+    $bomStrict | Select-Object -First 5 | ForEach-Object { Write-Output "         $_" }
+    $failed += "encoding"
+} else {
+    Write-Output "  ok   no BOM in JSON or TOML"
+}
+if ($bomLoose.Count -gt 0) {
+    Write-Output "  note BOM in $($bomLoose.Count) other file(s) (parsers accept it, but it is inconsistent)"
+}
+
 Write-Output ""
 Write-Output "===== 5. leak check ====="
 # The needles are built from code points rather than written literally.

@@ -110,7 +110,14 @@ try {
             Step "bumping version $current -> $clean"
             if (-not $DryRun) {
                 $conf.version = $clean
-                ($conf | ConvertTo-Json -Depth 100) | Set-Content $confPath -Encoding UTF8
+                # Written without a BOM on purpose. `Set-Content -Encoding UTF8`
+                # in Windows PowerShell 5.1 emits one, and a BOM at the start of
+                # a JSON file is not whitespace: Tauri's build script fails with
+                # "expected value at line 1 column 1" and the whole build stops
+                # with no mention of the BOM. This repository has hit that once
+                # already with a serde fixture.
+                $json = $conf | ConvertTo-Json -Depth 100
+                [IO.File]::WriteAllText($confPath, $json, (New-Object Text.UTF8Encoding($false)))
 
                 # Cargo.toml has to agree: the binary reports its own version, and
                 # a package whose contained binary disagrees is confusing to
