@@ -90,3 +90,66 @@ __pycache__/
 
 # One-off analysis scripts, like _*.ps1: throwaway, not part of the product.
 scripts/_*.py
+
+# ---------------------------------------------------------------- not source
+
+# Local agent instructions. Deliberately kept out of the repository: it is about
+# how this machine is worked on, not about the product.
+/AGENTS.md
+
+# Promotion material: copy for Xiaohongshu / Zhihu / Weibo / V2EX / Reddit /
+# Product Hunt, store listing screenshots, and the scripts that generate them.
+# Not code, and the store shots contain the publishing account's UI.
+/promo/
+
+# Screenshots and text captured from the verification VM as evidence. Useful
+# while working on a problem, not part of the product.
+/driver/vm/evidence/
+/shell-ext/vm/evidence/
+
+# The VM definition is generated and carries absolute host paths (ISO location,
+# VMware install directory, shared folder). The .vmx the VM actually runs from
+# lives outside the repository.
+/driver/vm/win11/*.vmx
+/driver/vm/win11/*.vmxf
+/driver/vm/win11/*.vmsd
+/driver/vm/win11/*.vmsn
+/driver/vm/win11/*.nvram
+/driver/vm/win11/*.lck/
+/driver/vm/win11/*.log
+
+# Preview render of the overlay icons, used while designing them.
+/shell-ext/icons/_preview.png
+
+# Signing material and keys. Never commit these: a private key in a public
+# repository is not recoverable by deleting the file.
+*.pfx
+*.p12
+*.pem
+*.key
+*.kdbx
+!**/test-fixtures/**/*.pem
+
+# Browser profiles. Cookies, saved passwords, autofill, history and the key that
+# decrypts them. Automated screenshot scripts create these; they are a live
+# credential store while they exist.
+**/user-data/
+**/edgeprofile/
+**/chrome-profile/
+**/Cookies
+**/Cookies-journal
+**/Login Data
+**/Login Data For Account
+**/Web Data
+**/Account Web Data
+**/Local State
+**/Secure Preferences
+**/key4.db
+**/logins.json
+**/cookies.sqlite
+**/places.sqlite/driver/vm/win11/*.vmdk
+/driver/vm/win11/*.vmem
+/driver/vm/win11/*.vmss
+/driver/vm/win11/*.vmx.lck/
+**/*.vmdk
+**/*.vmem
