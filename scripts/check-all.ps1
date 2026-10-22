@@ -201,6 +201,74 @@ if (Test-Path $releaseExe) {
 }
 
 Write-Output ""
+Write-Output "===== 8. version control ====="
+# The version used to exist only as a command-line argument to build-msix.ps1.
+# Seven packages went out and the repository recorded none of them: no tags, and
+# tauri.conf.json still said 0.1.0. These checks make that state impossible to
+# return to silently.
+$confVersion = $null
+try {
+    $confVersion = (Get-Content 'src-tauri\tauri.conf.json' -Raw | ConvertFrom-Json).version
+} catch { }
+if (-not $confVersion) {
+    Write-Output "  FAIL cannot read the version from tauri.conf.json"
+    $failed += "version"
+} else {
+    Write-Output "  version in tauri.conf.json: $confVersion"
+
+    # Three parts, per semver. build-msix appends the fourth for the package.
+    if ($confVersion -notmatch '^\d+\.\d+\.\d+$') {
+        Write-Output "  FAIL version must be Major.Minor.Patch"
+        $failed += "version"
+    }
+
+    # Cargo.toml has to agree: the binary reports its own version, and a package
+    # whose contained binary disagrees misleads every crash report.
+    $cargoLine = Select-String -Path 'src-tauri\Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if ($cargoLine) {
+        $cargoVersion = $cargoLine.Matches[0].Groups[1].Value
+        if ($cargoVersion -ne $confVersion) {
+            Write-Output "  FAIL Cargo.toml says $cargoVersion, tauri.conf.json says $confVersion"
+            $failed += "version"
+        } else {
+            Write-Output "  ok   Cargo.toml agrees ($cargoVersion)"
+        }
+    }
+
+    # A tag for the current version is what makes the artifact traceable. Once the
+    # version is tagged, the tag must still be an ancestor of HEAD rather than
+    # floating somewhere else.
+    $tagName = "v$confVersion"
+    $tagCommit = git rev-list -n 1 $tagName 2>$null
+    if (-not $tagCommit) {
+        Write-Output "  WARN $tagName is not tagged yet - run scripts\release.ps1 before publishing"
+    } else {
+        $reachable = git merge-base --is-ancestor $tagName HEAD 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output "  ok   $tagName is an ancestor of HEAD"
+        } else {
+            Write-Output "  FAIL $tagName is not reachable from HEAD"
+            $failed += "version"
+        }
+
+        # The version only moves forward. A repository version below the newest
+        # tag means a bump was forgotten or reverted.
+        $newest = git tag -l 'v*' --sort=-v:refname | Select-Object -First 1
+        if ($newest -and $newest -ne $tagName) {
+            $newestNum = $newest.TrimStart('v')
+            $cmp = [version]($confVersion + '.0')
+            $cmpNew = [version]($newestNum + $(if ($newestNum.Split('.').Count -eq 3) { '.0' } else { '' }))
+            if ($cmp -lt $cmpNew) {
+                Write-Output "  FAIL version $confVersion is behind the newest tag $newest"
+                $failed += "version"
+            } else {
+                Write-Output "  ok   newest tag is $newest"
+            }
+        }
+    }
+}
+
+Write-Output ""
 if ($failed.Count -eq 0) {
     Write-Output "ALL GREEN"
 } else {

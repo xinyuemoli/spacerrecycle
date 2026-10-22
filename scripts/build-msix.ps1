@@ -61,7 +61,16 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version          = "1.0.0.0",
+    # The package version, Major.Minor.Build.Revision.
+    #
+    # Defaults to the version recorded in src-tauri\tauri.conf.json, which is the
+    # single source of truth for it. This used to default to a hardcoded string
+    # and be supplied by hand on every build, which meant the repository did not
+    # record which version it was building and no build could be traced back to a
+    # commit. Passing a version that disagrees with the repository is now an
+    # error unless -AllowVersionOverride says otherwise.
+    [string]$Version          = "",
+    [switch]$AllowVersionOverride,
     [string]$PackageName      = "SpaceRecycle",
     [string]$Publisher        = "CN=xinyuemoli",
     [string]$PublisherDisplay = "SpaceRecycle",
@@ -80,6 +89,26 @@ $stageDir = Join-Path $msixDir "stage"
 $exePath  = Join-Path $tauriDir "target\release\spacerrecycle.exe"
 $logoSrc  = Join-Path $tauriDir "icons\icon-1024.png"
 $template = Join-Path $tauriDir "msix\Package.appxmanifest.template"
+
+# ---- the version comes from the repository, not from the command line ----
+#
+# tauri.conf.json holds a three-part version because that is what the app shows;
+# a Windows package needs four parts, with the fourth reserved for the Store. So
+# the fourth is appended here rather than stored.
+$confPath = Join-Path $tauriDir "tauri.conf.json"
+$confVersion = (Get-Content $confPath -Raw | ConvertFrom-Json).version
+if (-not $confVersion) { throw "No version in $confPath" }
+$repoVersion = if ($confVersion.Split('.').Count -eq 4) { $confVersion } else { "$confVersion.0" }
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = $repoVersion
+} elseif ($Version -ne $repoVersion) {
+    if (-not $AllowVersionOverride) {
+        throw "Version '$Version' does not match the repository ('$repoVersion' in tauri.conf.json). Bump the version in src-tauri\tauri.conf.json and src-tauri\Cargo.toml first, or pass -AllowVersionOverride if this is a throwaway build."
+    }
+    Write-Host "WARNING: building $Version while the repository says $repoVersion" -ForegroundColor Yellow
+}
+
 $outFile  = Join-Path $msixDir "SpaceRecycle_${Version}_x64.msix"
 
 if (-not (Get-Command winapp -ErrorAction SilentlyContinue)) {
@@ -95,6 +124,14 @@ $verParts = $Version.Split('.')
 if ($verParts.Count -ne 4) { throw "Version '$Version' must be in Major.Minor.Build.Revision form." }
 if ([int]$verParts[0] -lt 1) { throw "Invalid package version '$Version': the Major section cannot be 0 for a Store submission (use e.g. 1.0.0.0)." }
 if ([int]$verParts[3] -ne 0) { throw "Invalid package version '$Version': the fourth section is reserved for the Store and must be 0." }
+
+# Cargo.toml has to agree, or the binary reports a version different from the
+# package that contains it.
+$cargoLine = Select-String -Path (Join-Path $tauriDir "Cargo.toml") -Pattern '^version\s*=\s*"([^"]+)"' |
+    Select-Object -First 1
+if ($cargoLine -and $cargoLine.Matches[0].Groups[1].Value -ne $confVersion) {
+    throw "Cargo.toml says '$($cargoLine.Matches[0].Groups[1].Value)' but tauri.conf.json says '$confVersion'. They must agree."
+}
 
 if (-not $SkipBuild) {
     Write-Host "==> cargo build --release" -ForegroundColor Cyan
