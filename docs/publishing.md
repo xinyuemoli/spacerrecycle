@@ -163,7 +163,7 @@ winapp run src-tauri\target\msix\stage --detach
 1. 免费开发者账号（个人需政府 ID + 自拍实名）：<https://storedeveloper.microsoft.com>
 2. Partner Center → **New Product** → 预留名称 `SpaceRecycle`
 3. **把 `-Publisher` 换成 Partner Center 分配给你的 Publisher DN**（关键，填错会被拒）
-4. 上传 MSIX + 填写商店信息（文案直接取 `docs/store-listing.md`）
+4. 上传 MSIX + 填写商店信息（文案在 Partner Center 里填写）
 5. 提交 → 政策审核 → 通过后**微软自动签名**
 
 ### 4.4 仍需人工实测的一项
@@ -251,7 +251,6 @@ winapp run src-tauri\target\msix\stage --detach
 | `README.md` | 定位、特性、下载、构建、安全模型 |
 | `dist/.taurignore` | 打包时排除 `_test_*.mjs` 测试 harness，不破坏前端测试 |
 | `website/`（`index.html`+`styles.css`+`i18n.js`+`privacy.html`） | 中英双语官网，Cloudflare Pages 自动部署 |
-| `docs/store-listing.md` | Store 上架文案（中英双语，可直接粘贴） |
 | `src-tauri/icons/icon-1024.png` | MSIX 资产生成用的图标源（≥400×400） |
 | `src-tauri/msix/Package.appxmanifest.template` | MSIX manifest 模板（含 WebView2 依赖、1809 最低版本） |
 | `scripts/build-msix.ps1` | 一键打包 MSIX 的脚本 |

@@ -153,3 +153,8 @@ scripts/_*.py
 /driver/vm/win11/*.vmx.lck/
 **/*.vmdk
 **/*.vmem
+# Marketing copy and debug helpers. The Store listing text belongs in Partner
+# Center, not in the source tree; scripts that only echo environment variables
+# and pause are debugging scaffolding, not part of the project.
+docs/store-listing.md
+test_env.bat
