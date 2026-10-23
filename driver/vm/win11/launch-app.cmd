@@ -1,5 +1,5 @@
 @echo off
-REM Starts the app on the guest's interactive desktop.
+REM Starts the installed SpaceRecycle package on the guest's interactive desktop.
 REM
 REM vmrun's -interactive flag insists the credentials it was given belong to
 REM whoever is logged on at the console, and it rejects the pair even when
@@ -8,17 +8,30 @@ REM sitting behind LogonUI, which vmrun does not accept as an interactive
 REM logon. A scheduled task with /it runs in the logged-on user's session, needs
 REM no password stored, and is started by the service control manager rather
 REM than by vmrun, so it sidesteps the check entirely.
+REM
+REM This used to launch C:\sr-test\app\spacerrecycle.exe - a loose copy of the
+REM executable that had been sitting there since 2026-10-15. Every run through
+REM this script therefore showed an interface from that build, and a UI change
+REM that had landed days later kept being reported as still present. The wrong
+REM binary was running, and nothing said so.
+REM
+REM There is now one copy of the exe: the one inside the installed package. The
+REM package is what "installed" means, so it is what gets launched.
 set OUT=C:\sr-launch.txt
-set APP=C:\sr-test\app\spacerrecycle.exe
+set AUMID=xinyuemoli.SpaceRecycle_8svmmg7pm8t1w!spaceRecycle
 
-echo === previous instance === > "%OUT%"
+echo === what is installed === > "%OUT%"
+powershell -NoProfile -Command "Get-AppxPackage -Name '*SpaceRecycle*' | ForEach-Object { $_.PackageFullName + ' ' + $_.Version }" >> "%OUT%" 2>&1
+
+echo. >> "%OUT%"
+echo === previous instance === >> "%OUT%"
 taskkill /f /im spacerrecycle.exe >> "%OUT%" 2>&1
 ping -n 3 127.0.0.1 > nul
 
 echo. >> "%OUT%"
 echo === create the interactive task === >> "%OUT%"
 schtasks /delete /tn srapp /f >> "%OUT%" 2>&1
-schtasks /create /tn srapp /tr "%APP%" /sc once /st 23:59 /ru sruser /it /f >> "%OUT%" 2>&1
+schtasks /create /tn srapp /tr "cmd /c start \"\" shell:AppsFolder\%AUMID%" /sc once /st 23:59 /ru sruser /it /f >> "%OUT%" 2>&1
 echo create exit=%ERRORLEVEL% >> "%OUT%"
 
 echo. >> "%OUT%"
@@ -29,8 +42,9 @@ echo run exit=%ERRORLEVEL% >> "%OUT%"
 ping -n 40 127.0.0.1 > nul
 
 echo. >> "%OUT%"
-echo === is it running, and in which session === >> "%OUT%"
+echo === is it running, and from where === >> "%OUT%"
 tasklist /fi "imagename eq spacerrecycle.exe" >> "%OUT%" 2>&1
+powershell -NoProfile -Command "Get-Process spacerrecycle -ErrorAction SilentlyContinue | ForEach-Object { 'pid=' + $_.Id + ' path=' + $_.Path }" >> "%OUT%" 2>&1
 tasklist /fi "imagename eq msedgewebview2.exe" >> "%OUT%" 2>&1
 
 echo. >> "%OUT%"
