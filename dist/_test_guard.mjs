@@ -191,51 +191,42 @@ function dispoTag(value) {
   return m ? m[0] : "";
 }
 
+// The guard is not gated any more: the subscription tier was dropped before it
+// shipped, so every build offers all three dispositions. The rendering still
+// needs pinning down, because a disabled radio here would silently take the
+// protective choices away from everyone.
+
 const openTier = S.entitlement;
 S.entitlement = {
-  subscriber: false, source: "store",
-  cloudAllowed: false, importanceAllowed: false, guardAllowed: false,
+  subscriber: false, source: "not_configured",
+  cloudAllowed: true, importanceAllowed: true, guardAllowed: true,
 };
 S.guard = { serviceInstalled: false, serviceRunning: false, disposition: "ask", configured: true };
-// No mechanism at all, so the unprotected warning applies and the paid reason
-// has to sit alongside it rather than replace it.
+// No mechanism at all, so the unprotected warning is the one statement on the
+// screen that matters.
 S.protection = { kind: "none", active: false, detail: "\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4\u53ef\u7528" };
 await ui.render();
 html = doc();
 
-check("turning the guard on is disabled when it is gated",
-  dispoTag("ask").includes("disabled") && dispoTag("deny").includes("disabled"),
-  dispoTag("ask"));
-check("standing the guard down is never disabled",
+check("every disposition is selectable",
+  dispoTag("ask") !== "" && !dispoTag("ask").includes("disabled") &&
+  dispoTag("deny") !== "" && !dispoTag("deny").includes("disabled") &&
   dispoTag("allow") !== "" && !dispoTag("allow").includes("disabled"),
-  dispoTag("allow"));
-check("it names the subscription as the reason", html.includes("\u5220\u9664\u9632\u62a4\u9700\u8981\u6709\u6548\u8ba2\u9605"));
-check("the safety warning is not suppressed by the paid one",
+  dispoTag("ask"));
+check("no subscription is claimed as a requirement",
+  !html.includes("\u5220\u9664\u9632\u62a4\u9700\u8981\u6709\u6548\u8ba2\u9605"));
+check("the unprotected warning still shows",
   html.includes("\u6ca1\u6709\u4efb\u4f55\u4fdd\u62a4"),
-  "hiding 'nothing is protected' because the user has not paid inverts the priorities");
+  "with no mechanism at all the user has to be told files are exposed");
 check("the free choice is still selectable", st.getState().tab === "settings");
 
-// ---- A copy with nothing on sale keeps the whole guard open ----
-//
-// subscriber=false with the feature allowed is the GitHub build, and it is the
-// trap the entitlement design exists to avoid: reading `subscriber` here would
-// disable the controls on a copy where there is nothing to buy, locking people
-// out of a feature they can see.
+// ---- A held handle reports itself honestly ----
 
-S.entitlement = {
-  subscriber: false, source: "unpackaged",
-  cloudAllowed: true, importanceAllowed: true, guardAllowed: true,
-};
 S.protection = { kind: "hold", active: true, detail: "the guard is on, but no file is currently held" };
 await ui.render();
 html = doc();
 
-check("nothing on sale leaves the paid choices enabled",
-  !dispoTag("ask").includes("disabled") && !dispoTag("deny").includes("disabled"),
-  dispoTag("ask"));
-check("and does not claim a subscription is needed",
-  !html.includes("\u5220\u9664\u9632\u62a4\u9700\u8981\u6709\u6548\u8ba2\u9605"));
-check("and still reports protection honestly",
+check("a held handle is reported as protection",
   html.includes("no file is currently held"),
   "the hold status comes from protection_status, not from the driver service");
 
@@ -246,7 +237,7 @@ S.entitlement = openTier;
 for (const key of ["set.guard", "set.guardHint", "set.guard.ask", "set.guard.askHint",
                    "set.guard.deny", "set.guard.denyHint", "set.guard.allow", "set.guard.allowHint",
                    "set.guard.active", "set.guard.installedNotRunning", "set.guard.notInstalled",
-                   "set.guard.saved", "set.guard.default", "set.guard.needsSub"]) {
+                   "set.guard.saved", "set.guard.default"]) {
   const zh = i18n.t("zh", key);
   const en = i18n.t("en", key);
   check("string " + key, zh !== key && en !== key && zh !== en,

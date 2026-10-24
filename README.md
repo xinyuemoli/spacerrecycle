@@ -85,9 +85,6 @@ node dist/_test_scan.mjs
 node dist/_test_settings.mjs
 node dist/_test_importance.mjs
 node dist/_test_cloud.mjs
-node dist/_test_subscription.mjs
-node dist/_test_account.mjs
-node dist/_test_cloudbackup.mjs
 node dist/_test_cloudrestore.mjs
 
 # These two drive a real headless browser and need `playwright` + Chromium.

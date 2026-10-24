@@ -114,7 +114,17 @@ pub struct Config {
 /// rebuilds when the value changes.
 pub const DEFAULT_SUBSCRIPTION_ADDON_STORE_ID: &str = match option_env!("SPACERECYCLE_ADDON_ID") {
     Some(id) => id,
-    None => "SpaceRecyclePro",
+    // Empty: nothing is on sale.
+    //
+    // The subscription tier was dropped before the add-on was ever submitted to
+    // the Store, so every feature ships open. The gating machinery stays, because
+    // it is correct and cheap and the decision may come back - but an empty
+    // add-on ID is what "no tier" looks like to it: `EntitlementSource::
+    // NotConfigured`, which `paid_features_open()` already treats as "nothing to
+    // gate, let everything through".
+    //
+    // Passing -AddonStoreId to the build restores the tier without touching this.
+    None => "",
 };
 
 /// Azure application (client) ID for the OneDrive device-code flow, compiled
@@ -276,7 +286,7 @@ mod tests {
         // override them at all.
         assert_eq!(
             DEFAULT_SUBSCRIPTION_ADDON_STORE_ID,
-            option_env!("SPACERECYCLE_ADDON_ID").unwrap_or("SpaceRecyclePro")
+            option_env!("SPACERECYCLE_ADDON_ID").unwrap_or("")
         );
         assert_eq!(
             DEFAULT_GRAPH_CLIENT_ID,
@@ -284,25 +294,40 @@ mod tests {
         );
     }
 
-    /// A build that says nothing about its add-on still knows its add-on.
+    /// A build with no add-on has nothing on sale, so nothing is gated.
     ///
-    /// The alternative - leaving the default empty - means the gate silently
-    /// stops existing for anyone who builds without setting a variable, which
-    /// is the same outcome as forgetting to configure a release. The published
-    /// Store product ID is the right default precisely because forgetting is
-    /// the failure mode worth designing against.
+    /// This replaces a test that asserted the opposite default. The subscription
+    /// tier was dropped before the add-on was ever submitted, so the shipped
+    /// product is free; keeping the published Store product ID as the default
+    /// would now lock every paid feature behind a purchase that cannot be made.
+    ///
+    /// The trade-off is worth stating because it is a real one: a release that
+    /// forgets to pass -AddonStoreId now ships free rather than shipping broken.
+    /// For a product whose paid features are the delete guard and the importance
+    /// marks, broken is worse than free.
     #[test]
-    fn an_unconfigured_build_still_knows_the_store_product_id() {
-        // Skipped when the environment overrides it, which is how the override
-        // path is exercised; asserting the literal then would be wrong.
+    fn an_unconfigured_build_gates_nothing() {
         if option_env!("SPACERECYCLE_ADDON_ID").is_some() {
             return;
         }
-        assert_eq!(DEFAULT_SUBSCRIPTION_ADDON_STORE_ID, "SpaceRecyclePro");
-        assert_eq!(
-            Config::default().subscription_addon_store_id(),
-            "SpaceRecyclePro"
-        );
+        assert_eq!(DEFAULT_SUBSCRIPTION_ADDON_STORE_ID, "");
+
+        let cfg = Config::default();
+        assert!(cfg.subscription_addon_store_id().is_empty());
+
+        // The gate itself: no add-on means NotConfigured, and NotConfigured
+        // means open. The source is asserted separately from the permission
+        // because "nothing to gate" and "the user paid" are different claims -
+        // Settings shows the second one and must not claim the first.
+        let e = crate::license::entitlement_with(&cfg, 1_000_000, |_| {
+            crate::license::StoreAnswer::Unavailable("must not be asked".to_string())
+        });
+        assert_eq!(e.source, crate::license::EntitlementSource::NotConfigured);
+        assert!(e.paid_features_open());
+        assert!(e.guard_allowed());
+        assert!(e.cloud_allowed());
+        assert!(e.importance_allowed());
+        assert!(!e.is_subscriber());
     }
 
     #[test]

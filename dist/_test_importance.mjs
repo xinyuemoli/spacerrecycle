@@ -206,27 +206,26 @@ check("the menu offers to clear an existing mark", html.includes("清除标记")
 check("the menu is anchored where the pointer was",
   html.includes("left:40px") && html.includes("top:60px"));
 
-// ---------- the menu when the tier is closed ----------
+// ---------- the menu is never gated ----------
 //
-// The backend refuses the write either way, so the question here is what the
-// user sees. Offering the levels and letting every click fail reads as a broken
-// app; hiding the menu with no explanation reads as a missing feature. It opens
-// and names the reason.
+// The subscription tier was dropped before it shipped, so marking is always
+// available. Pinned because a gated menu that names a subscription is exactly
+// what this file used to assert, and re-introducing it silently would put every
+// user back behind a purchase that cannot be made.
+
 const openTier = S.entitlement;
 S.entitlement = {
-  subscriber: false, source: "store",
-  cloudAllowed: false, importanceAllowed: false, guardAllowed: false,
+  subscriber: false, source: "not_configured",
+  cloudAllowed: true, importanceAllowed: true, guardAllowed: true,
 };
 st.actions.openMenu("crit", 40, 60);
 await ui.render();
 html = doc();
-check("the menu still opens when marking is gated", html.includes("ctxmenu"));
-check("it names the reason instead of offering levels",
-  // Keyed on the menu's own buttons, not on a level's label: the labels also
-  // appear in the findings filter, which is unaffected by the tier.
-  html.includes("需要有效订阅") && !html.includes('data-act="set-imp"'),
+check("the menu offers the levels even when nothing is paid",
+  html.includes('data-act="set-imp"') && html.includes("重要"),
   html.slice(0, 240));
-check("it does not offer to clear a mark while gated", !html.includes("data-act=\"clear-imp\""));
+check("it does not name a subscription as the reason",
+  !html.includes("需要有效订阅"));
 S.entitlement = openTier;
 st.actions.openMenu("crit", 40, 60);
 await ui.render();

@@ -221,20 +221,6 @@ function layoutParts() {
 function importanceMenu() {
   const m = state.menu;
   const current = m.level;
-  const ent = state.entitlement;
-
-  // Gated in the UI as well as in the backend. Showing the levels and letting
-  // every click fail would read as a broken app rather than as a paid feature;
-  // hiding the menu without a word would read as a missing feature. So the
-  // menu still opens and says which of the two it is.
-  if (ent && !ent.importanceAllowed) {
-    return h`
-      <div class="menu-backdrop" data-act="close-menu"></div>
-      <div class="ctxmenu" style="left:${Math.round(m.x)}px;top:${Math.round(m.y)}px">
-        <div class="menu-head" title="${esc(m.path)}">${esc(m.name)}</div>
-        <div class="menu-locked">${T("imp.locked")}</div>
-      </div>`;
-  }
 
   const item = (level) => h`
     <button class="menu-item ${current === level ? "on" : ""}" data-act="set-imp" data-level="${level}">
@@ -601,9 +587,6 @@ function actionBar() {
         <option value="split" ${state.batchDisposition === "split" ? "selected" : ""}>${T("bar.split")}</option>
         <option value="purge" ${state.batchDisposition === "purge" ? "selected" : ""}>${T("bar.purgeAll")}</option>
         <option value="quarantine" ${state.batchDisposition === "quarantine" ? "selected" : ""}>${T("bar.quarantineAll")}</option>
-        ${state.entitlement && state.entitlement.subscriber
-          ? `<option value="backup" ${state.batchDisposition === "backup" ? "selected" : ""}>${T("bar.backupAll")}</option>`
-          : ""}
       </select>
       <button class="primary" data-act="preview">${T("bar.clean")}</button>
     </div>`;
@@ -788,130 +771,6 @@ function batchBody(b) {
 
 // ---------------- Settings ----------------
 
-/**
- * Subscription status.
- *
- * Hidden until the backend has answered, and honest about *why* when the
- * answer is "no": a user who has paid and is being refused needs the reason
- * (unconfigured build, Store unreachable, expired) rather than a bare "not
- * subscribed".
- */
-function subscriptionCard() {
-  const e = state.entitlement;
-  if (!e) return "";
-  const src = T("sub.src." + e.source);
-
-  // Why the paid features are open, when they are and nobody has paid. The two
-  // reasons are different sentences and only one of them is about the user:
-  // a copy that did not come from the Store, versus a Store build whose
-  // subscription has not gone on sale yet.
-  let openNote = "";
-  if (!e.subscriber && e.source === "unpackaged") {
-    openNote = `<div class="faint mt" style="font-size:11px">${T("sub.openUnpackaged")}</div>`;
-  } else if (!e.subscriber && e.source === "not_configured") {
-    openNote = `<div class="faint mt" style="font-size:11px">${T("sub.openUnsold")}</div>`;
-  }
-
-  return h`
-    <h2 class="section">${T("sub.title")}</h2>
-    <div class="card mb">
-      <div class="setrow">
-        <div>
-          <div class="setlabel">
-            <span class="tag ${e.subscriber ? "safe" : "userdata"}">
-              ${e.subscriber ? T("sub.active") : T("sub.inactive")}
-            </span>
-          </div>
-          <div class="faint" style="font-size:11px;margin-top:4px">${esc(e.detail)}</div>
-          <div class="faint" style="font-size:11px">${T("sub.source", { src: esc(src) })}</div>
-          ${e.expiresUnix ? `<div class="faint" style="font-size:11px">${T("sub.expires", { date: fmtWhen(e.expiresUnix) })}</div>` : ""}
-        </div>
-        <button class="sm" data-act="refresh-entitlement">${T("sub.recheck")}</button>
-      </div>
-      <div class="faint mt" style="font-size:11px">${T("sub.hint")}</div>
-      <ul class="gated">
-        <li class="${e.cloudAllowed ? "" : "off"}">${T("sub.gated.cloud")}</li>
-        <li class="${e.importanceAllowed ? "" : "off"}">${T("sub.gated.importance")}</li>
-        <li class="${e.guardAllowed ? "" : "off"}">${T("sub.gated.guard")}</li>
-      </ul>
-      ${openNote}
-    </div>`;
-}
-
-/**
- * OneDrive account and cloud quota.
- *
- * Three states, and the interesting one is the middle: a device-code sign-in
- * happens in the user's own browser, so the app is waiting on something it
- * cannot observe. The code is shown large and the URL as selectable text rather
- * than a link, because navigating the app's own webview to Microsoft's sign-in
- * page would replace the app with a web page.
- */
-function accountCard() {
-  if (state.connect) return connectPanel(state.connect);
-  const a = state.onedriveAccount;
-  if (!a) return "";
-
-  if (!a.connected) {
-    return h`
-      <h2 class="section">${T("acc.title")}</h2>
-      <div class="card mb">
-        <div class="setrow">
-          <div>
-            <div class="setlabel">${T("acc.notConnected")}</div>
-            <div class="faint" style="font-size:11px;margin-top:4px">${T("acc.hint")}</div>
-          </div>
-          <button class="sm primary" data-act="acc-connect">${T("acc.connect")}</button>
-        </div>
-        ${a.detail ? `<div class="faint mt" style="font-size:11px">${esc(a.detail)}</div>` : ""}
-      </div>`;
-  }
-
-  const q = a.quota;
-  const pct = q && q.totalBytes ? Math.min(100, Math.round((q.usedBytes / q.totalBytes) * 100)) : 0;
-  return h`
-    <h2 class="section">${T("acc.title")}</h2>
-    <div class="card mb">
-      <div class="setrow">
-        <div>
-          <div class="setlabel"><span class="tag safe">${T("acc.connected")}</span></div>
-          ${q
-            ? `<div class="faint" style="font-size:11px;margin-top:6px">
-                 ${T("acc.quota", { used: fmtBytes(q.usedBytes), total: fmtBytes(q.totalBytes), remaining: fmtBytes(q.remainingBytes) })}
-               </div>
-               <div class="qbar"><span style="width:${pct}%"></span></div>
-               <div class="faint" style="font-size:11px">${T("acc.state", { state: esc(q.state) })}</div>`
-            : `<div class="faint" style="font-size:11px;margin-top:6px">${T("acc.quotaUnavailable")}</div>
-               ${a.detail ? `<div class="faint" style="font-size:11px">${esc(a.detail)}</div>` : ""}`}
-        </div>
-        <button class="sm" data-act="acc-signout">${T("acc.signOut")}</button>
-      </div>
-      <div class="faint mt" style="font-size:11px">${T("acc.scopeNote")}</div>
-      ${q ? `<div class="faint" style="font-size:11px;margin-top:6px">${T("acc.backupWhere")}</div>` : ""}
-    </div>`;
-}
-
-/** The in-progress device-code sign-in. */
-function connectPanel(c) {
-  const status = c.status === "pending" ? T("acc.waiting")
-    : c.status === "slow_down" ? T("acc.slowDown")
-    : c.status === "error" ? T("acc.retrying")
-    : T("acc.waiting");
-  return h`
-    <h2 class="section">${T("acc.title")}</h2>
-    <div class="card mb">
-      <div class="setlabel">${T("acc.enterCode")}</div>
-      <div class="acc-code">${esc(c.userCode)}</div>
-      <div class="faint" style="font-size:11px">${T("acc.openAt")}</div>
-      <div class="mono acc-url">${esc(c.verificationUri)}</div>
-      <div class="toolbar mt" style="margin-bottom:0">
-        <button class="sm" data-act="acc-copy">${T("acc.copyLink")}</button>
-        <button class="sm" data-act="acc-cancel">${T("acc.cancel")}</button>
-        <span class="faint" style="font-size:11px">${status}</span>
-      </div>
-      ${c.detail ? `<div class="faint mt" style="font-size:11px">${esc(c.detail)}</div>` : ""}
-    </div>`;
-}
 
 /// What the delete guard does with a file marked 重要.
 ///
@@ -929,13 +788,6 @@ function guardCard() {
     disposition: "ask", serviceInstalled: false, serviceRunning: false,
     configured: false, unknown: true,
   };
-
-  // The guard is a paid feature, and the resolved flag is used rather than
-  // "is this user a subscriber" because a copy with nothing on sale - the
-  // GitHub build, or a Store build with no add-on published yet - must keep the
-  // feature open. Reading `subscriber` here would lock those copies out of a
-  // feature they can plainly see.
-  const guardAllowed = !!(state.entitlement && state.entitlement.guardAllowed);
 
   // What is protecting files, taken from protection_status rather than from the
   // service state.
@@ -971,19 +823,14 @@ function guardCard() {
     health = "ok";
   }
 
-  // Two of the three dispositions turn the guard on and are therefore the paid
-  // part. The third stands it down, and standing down is never gated - refusing
-  // to let someone stop being protected would be a worse failure than letting
-  // them start without paying, and the backend has always allowed it.
-  //
   // The input stays on one line deliberately: _test_guard.mjs matches the
   // rendered markup as a substring, and reflowing the tag is how that contract
   // breaks without any behaviour changing.
-  const option = (value, labelKey, hintKey, enabled) => {
+  const option = (value, labelKey, hintKey) => {
     const on = g.disposition === value;
     return h`
       <label class="guardopt${on ? " on" : ""}">
-        <input type="radio" name="guard-dispo" value="${value}" data-act="guard" ${on ? "checked" : ""} ${enabled ? "" : "disabled"} />
+        <input type="radio" name="guard-dispo" value="${value}" data-act="guard" ${on ? "checked" : ""} />
         <span>
           <span class="setlabel">${T(labelKey)}</span>
           <span class="faint guardhint">${T(hintKey)}</span>
@@ -991,12 +838,7 @@ function guardCard() {
       </label>`;
   };
 
-  // Both lines, not one instead of the other. The subscription reason explains
-  // why the options are unavailable; "nothing is protected" is a safety
-  // statement that stays true either way, and suppressing it because the user
-  // has not paid would hide the more serious of the two facts.
   const banner = h`
-      ${guardAllowed ? "" : h`<div class="guardstatus warn">${T("set.guard.needsSub")}</div>`}
       ${health ? h`<div class="guardstatus ${health}">${status}</div>` : ""}`;
 
   return h`
@@ -1005,62 +847,34 @@ function guardCard() {
       <div class="faint" style="font-size:11px">${T("set.guardHint")}</div>
       ${banner}
       <div class="guardopts">
-        ${option("ask", "set.guard.ask", "set.guard.askHint", guardAllowed)}
-        ${option("deny", "set.guard.deny", "set.guard.denyHint", guardAllowed)}
-        ${option("allow", "set.guard.allow", "set.guard.allowHint", true)}
+        ${option("ask", "set.guard.ask", "set.guard.askHint")}
+        ${option("deny", "set.guard.deny", "set.guard.denyHint")}
+        ${option("allow", "set.guard.allow", "set.guard.allowHint")}
       </div>
       ${g.configured ? "" : h`<div class="faint mt" style="font-size:11px">${T("set.guard.default")}</div>`}
     </div>`;
 }
 
 /**
- * Where quarantined items are kept: this disk, or the user's OneDrive.
+ * Where quarantined items are kept.
  *
- * The cloud option is a subscriber feature and also needs a linked account, so
- * it is rendered disabled with the reason rather than hidden. A setting that
- * silently disappears cannot be discovered, and a user who is paying for it
- * and cannot find it has no way to tell that apart from a bug.
+ * The cloud target is gone with the OneDrive integration: quarantine to OneDrive
+ * needed a linked account and therefore a registered Azure application, and that
+ * was dropped before it shipped. What is left is the local store - which is also
+ * where a failed cloud upload fell back to, so the path shown here is the one
+ * that applied in the end anyway.
  *
- * The local path is always shown, even when OneDrive is selected, because it is
- * still where an upload that fails ends up: the engine falls back to it rather
- * than dropping the item.
+ * `quarantineTarget` stays in the config and the engine still understands
+ * "onedrive"; the setting is simply not offered until there is something to
+ * offer it for.
  */
 function quarantineCard() {
   const c = state.config || {};
-  const target = c.quarantineTarget === "onedrive" ? "onedrive" : "local";
-  const subscriber = !!(state.entitlement && state.entitlement.subscriber);
-  const linked = !!(state.onedriveAccount && state.onedriveAccount.connected);
-  const cloudReady = subscriber && linked;
-
-  const option = (value, labelKey, hintKey, enabled) => {
-    const on = target === value;
-    return h`
-      <label class="guardopt${on ? " on" : ""}">
-        <input type="radio" name="q-target" value="${value}" data-act="qtarget"
-               ${on ? "checked" : ""} ${enabled ? "" : "disabled"} />
-        <span>
-          <span class="setlabel">${T(labelKey)}</span>
-          <span class="faint guardhint">${T(hintKey)}</span>
-        </span>
-      </label>`;
-  };
-
-  // Which of the two reasons applies, spelled out rather than left as one
-  // generic "unavailable": they call for different actions from the user.
-  let why = "";
-  if (!subscriber) why = T("set.q.needsSub");
-  else if (!linked) why = T("set.q.needsAccount");
-
   return h`
     <h2 class="section">${T("set.location")}</h2>
     <div class="card mb">
       <div class="faint" style="font-size:11px">${T("set.locationHint")}</div>
-      <div class="guardopts">
-        ${option("local", "set.q.local", "set.q.localHint", true)}
-        ${option("onedrive", "set.q.oneDrive", "set.q.oneDriveHint", cloudReady)}
-      </div>
       <div class="mono faint mt" style="font-size:11px;word-break:break-all">${esc(c.quarantineDir || "")}</div>
-      ${cloudReady ? "" : h`<div class="guardstatus warn">${why}</div>`}
     </div>`;
 }
 
@@ -1117,9 +931,7 @@ function settingsView() {
 
     ${guardCard()}
 
-    ${subscriptionCard()}
 
-    ${accountCard()}
 
     ${quarantineCard()}
 

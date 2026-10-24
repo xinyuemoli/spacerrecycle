@@ -80,23 +80,22 @@ check("log file path shown", html.includes("audit.log"));
 check("large-file size shown in MB", html.includes('value="1"'), "1048576 bytes should render as 1 MB");
 check("expiry notice states no auto-delete", html.includes("\u7edd\u4e0d\u81ea\u52a8\u5220\u9664"));
 
-// ---- A disabled option explains itself ----
+// ---- The OneDrive quarantine target is gone ----
 //
-// No entitlement and no linked account in this fixture, so the OneDrive
-// quarantine option is unavailable. It used to render greyed out with no reason
-// at all: the explanation was conditioned on the option already being selected,
-// which is impossible for a control the user cannot select. The state that
-// exposed it was a non-subscriber staring at a dead radio button with nothing
-// telling them whether the problem was money or an account.
+// It needed a linked account and therefore a registered Azure application, and
+// that was dropped before it shipped. What is left is the local store, whose
+// path still has to be shown - it is where quarantined items actually live, and
+// it was always the fallback when a cloud upload failed.
 
-check("the unavailable OneDrive option is disabled",
-  /<input[^>]*value="onedrive"[^>]*disabled/.test(html),
-  "the option must not look usable");
-check("the local option stays usable",
-  !/<input[^>]*value="local"[^>]*disabled/.test(html));
-check("and the reason is stated",
-  html.includes("OneDrive \u9694\u79bb\u9700\u8981\u6709\u6548\u8ba2\u9605"),
-  "without this the option is dead with no explanation");
+check("no cloud quarantine target is offered",
+  !/<input[^>]*value="onedrive"/.test(html),
+  "the target is unreachable without the OAuth integration");
+check("no radio button is left behind either",
+  !/<input[^>]*name="q-target"/.test(html),
+  "a lone local radio with one option is a control that cannot do anything");
+check("the local quarantine path is still shown",
+  html.includes("Quarantine"),
+  "the path is the only thing this card still has to say");
 
 console.log("\nDONE");
 
